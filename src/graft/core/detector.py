@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 
-class Lang(str, Enum):
+class Lang(StrEnum):
     PYTORCH_PYTHON = "pytorch_python"
     TRITON = "triton"
     CUDA_CPP = "cuda_cpp"
@@ -34,7 +34,15 @@ class Route:
 
 
 CUDA_API_RE = re.compile(r"torch\.cuda\.(\w+)")
-PTX_RE = re.compile(r"\.ptx\b|asm\s*\(\s*\"")
+# PTX is identified by instruction mnemonics and special registers, not by
+# the asm( syntax: real CUDA emits asm volatile("..."), and PyTorch kernels
+# carry PTX in plain strings. Both must be caught.
+PTX_RE = re.compile(
+    r"asm\s+(?:volatile\s*)?\(|"
+    r"%laneid|%ctaid|%tid|"
+    r"mma\.sync|wgmma|"
+    r"ld\.global|st\.global|bar\.warp\.sync|cvta\.to\.global"
+)
 CUTLASS_RE = re.compile(r"cutlass|cute::", re.IGNORECASE)
 NVCC_RE = re.compile(r"nvcc|-gencode|arch=compute", re.IGNORECASE)
 TRITON_RE = re.compile(r"@triton\.jit|import\s+triton")
@@ -60,7 +68,7 @@ def detect(path: Path | None, source: str) -> Route:
     route.has_nvcc = bool(NVCC_RE.search(source))
 
     if route.lang in (Lang.CUDA_CPP, Lang.TRITON):
-        route.warp_literals = sorted(set(WARP_LITERAL_RE.findall(source)))
+        route.warp_literals = sorted({int(m) for m in WARP_LITERAL_RE.findall(source)})
 
     if route.has_ptx:
         route.notes.append("inline PTX detected: no mechanical translation exists")

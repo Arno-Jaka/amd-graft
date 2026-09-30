@@ -8,14 +8,14 @@ consumes. This module defines the project's internal data contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from . import detector, torch_rewriter
 from .detector import Route
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     PRODUCTION_READY = "production_ready"
     NEEDS_REVIEW = "needs_review"
     MANUAL_PORT = "manual_port"
@@ -59,9 +59,7 @@ def _apply_verdict(result: MigrationResult) -> None:
 
 def convert(source: str, path: Path | None = None) -> MigrationResult:
     route = detector.detect(path, source)
-    result = MigrationResult(
-        source_path=path, original_source=source, route=route
-    )
+    result = MigrationResult(source_path=path, original_source=source, route=route)
 
     if route.lang in (detector.Lang.CUDA_CPP, detector.Lang.TRITON):
         result.coverage.verdict = Verdict.UNSUPPORTED

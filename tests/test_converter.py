@@ -1,5 +1,84 @@
-"""Stage 3 — Converter routing tests.
+"""Stage 1 — converter routing, verdict logic, and result contract."""
 
-Covers detector classification and the deterministic backends, so
-refactoring cannot silently break conversion.
-"""
+from pathlib import Path
+
+import pytest
+
+from graft.core.converter import Verdict, convert
+
+EXAMPLE = Path("examples/01_torch_cuda_softmax.py")
+
+
+@pytest.fixture
+def example_source() -> str:
+    return EXAMPLE.read_text()
+
+
+def test_example_converts(example_source):
+    result = convert(example_source, EXAMPLE)
+    assert result.route.lang.value == "pytorch_python"
+    assert result.backend == "ast"
+    assert result.converted is True
+
+
+def test_ported_source_is_valid_python(example_source):
+    import ast
+
+    ast.parse(convert(example_source, EXAMPLE).ported_source)
+
+
+def test_example_reaches_production_ready(example_source):
+    """The demo example must stay clean, or the demo looks broken."""
+    result = convert(example_source, EXAMPLE)
+    assert result.coverage.verdict is Verdict.PRODUCTION_READY
+
+
+def test_changes_are_line_attributed(example_source):
+    result = convert(example_source, EXAMPLE)
+    assert result.changes
+    for change in result.changes:
+        assert change["line"] > 0
+        assert change["reason"]
+
+
+def test_cuda_cpp_routes_to_unsupported_not_crash():
+    result = convert("__global__ void k() {}", Path("m.cu"))
+    assert result.coverage.verdict is Verdict.UNSUPPORTED
+    assert result.backend == "none"
+    assert result.converted is False
+    assert result.notes
+
+
+def test_triton_routes_to_unsupported():
+    src = "import torch\nimport triton\n\n@triton.jit\ndef k(x):\n    pass\n"
+    result = convert(src, Path("m.py"))
+    assert result.coverage.verdict is Verdict.UNSUPPORTED
+
+
+def test_unclassifiable_input_is_rejected():
+    result = convert("just some prose with no imports", Path("notes.txt"))
+    assert result.coverage.verdict is Verdict.UNSUPPORTED
+    assert result.converted is False
+
+
+def test_ptx_downgrades_to_manual_port():
+    """Worst case wins: PTX can never be production-ready."""
+    src = 'import torch\nkernels = "mma.sync.aligned.m16n8k16"\n'
+    assert convert(src, Path("m.py")).coverage.verdict is Verdict.MANUAL_PORT
+
+
+def test_nvcc_flags_downgrade_to_manual_port():
+    src = 'import torch\ncmd = "nvcc -gencode arch=compute_90"\n'
+    assert convert(src, Path("m.py")).coverage.verdict is Verdict.MANUAL_PORT
+
+
+def test_config_import_prepended_once(example_source):
+    ported = convert(example_source, EXAMPLE).ported_source
+    assert "from graft.config import" in ported
+    assert ported.count("from graft.config import") == 1
+
+
+def test_convert_is_deterministic(example_source):
+    a = convert(example_source, EXAMPLE).ported_source
+    b = convert(example_source, EXAMPLE).ported_source
+    assert a == b
