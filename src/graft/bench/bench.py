@@ -19,16 +19,12 @@ import torch
 
 from graft import config
 
-# Verdict thresholds, calibrated against measured noise rather than
-# intuition. Two IDENTICAL implementations measured back to back on
-# shared hardware vary by 3-30% run to run, so a 5% band would report
-# regressions that do not exist. Real differences of 2x or more are
-# stable and are reported confidently; anything under ~10% is noise.
-#
-# Move these to config once benchmarking on dedicated AMD hardware, where
-# jitter is far lower and tighter bands become defensible.
-NOISE_BAND = 1.10
-SIGNIFICANT_BAND = 1.25
+# Verdict thresholds live in config so the report, UI, and this module
+# all quote the same numbers. They are calibrated against measured noise:
+# identical kernels vary by several percent run to run on shared hardware,
+# so a naive 5% band would report regressions that do not exist.
+NOISE_BAND = config.BENCH_NOISE_BAND
+SIGNIFICANT_BAND = config.BENCH_SIGNIFICANT_BAND
 
 
 def sync(device: torch.device) -> None:

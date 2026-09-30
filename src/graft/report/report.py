@@ -1,6 +1,223 @@
-"""Stage 3 — Markdown report generation.
+"""Stage 4 — Markdown report generation.
 
-Assembles change log, unmapped items, parity results with numbers,
-benchmark table, and readiness verdict into an exportable document.
-Demoable on its own, before any AI exists in the project.
+Assembles change log, unmapped items, parity results, benchmarks, and a
+readiness verdict into one exportable document. Demoable with no AI in
+the loop: every number below comes from a stage that was actually run.
+
+Two rules keep the report from lying:
+
+1. A missing measurement is printed as "not measured", never as a pass.
+   Silence is not evidence.
+2. The verdict is derived from results that exist. Anything unmeasured
+   downgrades readiness rather than being quietly omitted.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from graft import config
+from graft.bench import telemetry
+from graft.core.converter import MigrationResult, Verdict
+
+NOT_MEASURED = "not measured"
+
+
+@dataclass
+class ReportInputs:
+    """Everything the report may cite. Absent stages stay None.
+
+    Deliberately loose typing: the report consumes dicts produced by
+    several stages and must render a partial run without crashing.
+    """
+
+    migration: MigrationResult | None = None
+    parity: dict | None = None
+    parity_results: list | None = None
+    benchmarks: list[dict] = field(default_factory=list)
+    telemetry_snapshot: dict | None = None
+    skipped_notes: list[str] = field(default_factory=list)
+
+
+def _fmt(value, spec="{:.3e}", missing=NOT_MEASURED) -> str:
+    if value is None:
+        return missing
+    if isinstance(value, float):
+        return spec.format(value)
+    return str(value)
+
+
+def _verdict_line(verdict) -> str:
+    labels = {
+        Verdict.PRODUCTION_READY: "PRODUCTION READY",
+        Verdict.NEEDS_REVIEW: "NEEDS REVIEW",
+        Verdict.MANUAL_PORT: "MANUAL PORT REQUIRED",
+        Verdict.UNSUPPORTED: "UNSUPPORTED",
+    }
+    return labels.get(verdict, str(verdict))
+
+
+def _conversion_section(migration: MigrationResult | None) -> list[str]:
+    if migration is None:
+        return ["## Conversion", "", f"{NOT_MEASURED} (no conversion run).", ""]
+
+    lines = [
+        "## Conversion",
+        "",
+        f"- Route: {migration.route.lang if migration.route else 'unknown'}",
+        f"- Backend: {migration.backend}",
+        f"- Changes applied: {len(migration.changes)}",
+    ]
+    for change in migration.changes:
+        symbol = change.get("symbol", "?")
+        reason = change.get("reason") or change.get("note") or ""
+        line = change.get("line")
+        where = f" (line {line})" if line else ""
+        text = f"- `{symbol}`{where}"
+        lines.append(f"{text}: {reason}" if reason else text)
+
+    if migration.coverage.unmapped:
+        lines += ["", "### Unmapped (require human attention)", ""]
+        for item in migration.coverage.unmapped:
+            symbol = item.get("symbol", "?") if isinstance(item, dict) else str(item)
+            reason = ""
+            if isinstance(item, dict):
+                reason = item.get("reason") or item.get("note") or ""
+            lines.append(f"- `{symbol}`" + (f" — {reason}" if reason else ""))
+    else:
+        lines += ["", "### Unmapped", "", "None."]
+
+    if migration.notes:
+        lines += ["", "### Notes", ""]
+        lines += [f"- {note}" for note in migration.notes]
+    return [*lines, ""]
+
+
+def _parity_section(inputs: ReportInputs) -> list[str]:
+    summary = inputs.parity
+    lines = ["## Parity", ""]
+    if summary is None:
+        lines += [f"{NOT_MEASURED} (parity harness not run).", ""]
+    else:
+        passed = summary.get("passed", 0)
+        total = summary.get("total", 0)
+        state = "PASS" if summary.get("all_passed") else "FAIL"
+        lines += [
+            f"**{state}** — {passed}/{total} cases within tolerance",
+            "",
+            f"- Worst case: {_fmt(summary.get('worst_case'), '{:.0f}', 'n/a')}"
+            if summary.get("worst_case")
+            else "- Worst case: n/a",
+            f"- Max absolute error: {_fmt(summary.get('max_abs_error'))}",
+        ]
+        failures = [r for r in (inputs.parity_results or []) if not r.passed]
+        if failures:
+            lines += ["", "### Failures", ""]
+            for result in failures:
+                detail = result.error or "tolerance exceeded"
+                lines.append(f"- `{result.name}` — {detail}")
+        lines.append("")
+
+    lines += [
+        "Tolerances are per-dtype. Comparison is port vs an independent "
+        "reference on the same device, not CUDA vs ROCm.",
+        "",
+    ]
+    return lines
+
+
+def _benchmark_section(inputs: ReportInputs) -> list[str]:
+    lines = ["## Benchmarks", ""]
+    if not inputs.benchmarks:
+        lines += [f"{NOT_MEASURED} (no benchmark data).", ""]
+    else:
+        lines += [
+            "| Comparison | Result | Verdict |",
+            "| --- | --- | --- |",
+        ]
+        for entry in inputs.benchmarks:
+            if "ratio" in entry:
+                headline = f"ratio {entry['ratio']}"
+            elif "speedup" in entry:
+                headline = f"{entry['speedup']}x"
+            else:
+                headline = NOT_MEASURED
+            lines.append(
+                f"| {entry.get('label', 'unnamed')} | {headline} "
+                f"| {entry.get('verdict', NOT_MEASURED)} |"
+            )
+        lines += [
+            "",
+            f"Wall-clock noise band: ±{(config.BENCH_NOISE_BAND - 1) * 100:.0f}%. "
+            "Ratios inside it are reported as noise, not as passes.",
+            "",
+        ]
+    return lines
+
+
+def _readiness(inputs: ReportInputs) -> list[str]:
+    """Downgrade rather than omit anything that was not measured."""
+    blockers: list[str] = []
+    migration = inputs.migration
+
+    if migration is None:
+        blockers.append("Conversion was not run.")
+    elif migration.coverage.verdict is not Verdict.PRODUCTION_READY:
+        blockers.append(
+            f"Conversion verdict: {_verdict_line(migration.coverage.verdict)}"
+        )
+
+    if inputs.parity is None:
+        blockers.append("Parity was not measured.")
+    elif not inputs.parity.get("all_passed"):
+        blockers.append("One or more parity cases exceeded tolerance.")
+
+    if not inputs.benchmarks:
+        blockers.append("No benchmarks were recorded.")
+
+    snapshot = inputs.telemetry_snapshot
+    if snapshot is None:
+        blockers.append("Hardware telemetry was not captured.")
+    elif not snapshot.get("gpu_available"):
+        blockers.append(
+            "No AMD GPU was detected; results are CPU-only and do not "
+            "demonstrate ROCm performance."
+        )
+
+    blockers += inputs.skipped_notes
+
+    verdict = (
+        Verdict.PRODUCTION_READY
+        if not blockers
+        else (Verdict.NEEDS_REVIEW if migration else Verdict.UNSUPPORTED)
+    )
+    return (
+        ["## Readiness", "", f"**{_verdict_line(verdict)}**", ""]
+        + [f"- {item}" for item in blockers]
+        + [""]
+    )
+
+
+def render(inputs: ReportInputs) -> str:
+    snapshot = inputs.telemetry_snapshot or telemetry.device_snapshot()
+
+    lines = [
+        "# Graft migration report",
+        "",
+        f"Generated by {config.PROJECT_NAME} on the "
+        f"{snapshot.get('backend', 'unknown backend')} backend.",
+        "",
+        "## Environment",
+        "",
+        f"- Backend: {snapshot.get('backend', NOT_MEASURED)}",
+        f"- GPU present: {snapshot.get('gpu_available', False)}",
+        f"- GPU: {snapshot.get('gpu_name', NOT_MEASURED)}",
+        f"- Total VRAM: {_fmt(snapshot.get('total_vram_mb'), '{:.0f}', 'n/a')} MB",
+        f"- Peak VRAM: {_fmt(snapshot.get('peak_vram_mb'), '{:.1f}', 'n/a')} MB",
+        "",
+    ]
+    lines += _conversion_section(inputs.migration)
+    lines += _parity_section(inputs)
+    lines += _benchmark_section(inputs)
+    lines += _readiness(inputs)
+    return "\n".join(lines).rstrip() + "\n"
