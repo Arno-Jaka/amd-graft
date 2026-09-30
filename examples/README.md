@@ -5,10 +5,17 @@ Each example is a module satisfying the entrypoint contract:
 | Element | Purpose |
 | --- | --- |
 | `solve(x_cpu) -> tensor` | entry point, shape-generic, CPU tensor in/out |
+| `kernel(x) -> tensor` | device-resident, no transfers, safe to benchmark |
 | `OPERATION` | key into the reference registry in `graft/core/reference.py` |
 
 `solve` must accept any shape: `verify/cases.py` drives it across a range
 of inputs, and a kernel hardcoded to one tensor size cannot be verified.
+
+`solve` and `kernel` are separate on purpose. `solve` moves data to the
+device and back, so timing it measures transfer overhead plus kernel time.
+`kernel` operates on a tensor already resident on the device, which is
+what `bench/` needs in order to compare a port against the reference on
+equal footing.
 
 ## Available
 

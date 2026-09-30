@@ -35,3 +35,7 @@ def get_reference(operation: str):
             f"no reference registered for {operation!r};"
             f"known operations: {sorted(REFERENCES)}"
         ) from None
+
+
+def _softmax(x: torch.Tensor) -> torch.Tensor:
+    return torch.softmax(x, dim=-1)

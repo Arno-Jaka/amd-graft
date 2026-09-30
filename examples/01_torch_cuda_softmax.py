@@ -6,6 +6,7 @@ graft.config so this file runs unchanged on a CPU laptop and a ROCm GPU.
 
 Contract:
     solve(x_cpu) -> tensor   entry point, shape-generic, CPU tensor in/out
+    kernel(x) -> tensor      device-resident, no transfers, benchmarkable
     OPERATION                key into the reference registry
 """
 
@@ -24,9 +25,14 @@ def softmax(x):
     return e / e.sum(dim=-1, keepdim=True)
 
 
+def kernel(x):
+    """Device-resident entry point. No transfers: safe to benchmark."""
+    return softmax(x)
+
+
 def solve(x_cpu):
     x = x_cpu.to(resolve_device())
-    out = softmax(x)
+    out = kernel(x)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     return out.cpu()
