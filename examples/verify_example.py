@@ -1,19 +1,18 @@
-"""Smoke check: the demo example converts and still matches its reference.
+"""Smoke check: the demo example converts and passes parity.
 
-Run in CI so a regression in the converter surfaces as a red build rather
-than as a broken demo.
+Run in CI so a converter or harness regression surfaces as a red build
+rather than a broken live demo. Delegates to graft.verify.parity so the
+comparison logic lives in exactly one place.
 """
+
+from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
 
-import torch
-
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "01_torch_cuda_softmax.py"
-
-SHAPES = [(1, 1), (4, 8), (16, 128), (7, 33), (2, 3, 65), (1, 1024)]
 
 
 def load_example():
@@ -26,32 +25,31 @@ def load_example():
 
 def main() -> int:
     from graft.core.converter import convert
+    from graft.verify import cases, parity
 
-    source = EXAMPLE.read_text()
-    result = convert(source, EXAMPLE)
-
+    result = convert(EXAMPLE.read_text(), EXAMPLE)
     assert result.converted, f"conversion failed: {result.coverage.verdict}"
     assert result.coverage.verdict.value == "production_ready", (
         f"demo example must stay production-ready, got "
         f"{result.coverage.verdict.value}"
     )
 
-    module = load_example()
-    failures = []
-    for shape in SHAPES:
-        x = torch.randn(*shape)
-        got, expected = module.solve(x), module.reference(x)
-        err = (got - expected).abs().max().item()
-        ok = torch.allclose(got, expected, rtol=1e-5, atol=1e-6)
-        print(f"  {str(shape):12} max_abs_err={err:.3e}  {'PASS' if ok else 'FAIL'}")
-        if not ok:
-            failures.append((shape, err))
+    results = parity.check(load_example(), cases.generate())
+    for r in results:
+        if not r.passed:
+            print(f"  {r.name:24} FAIL  {r.error}")
+            continue
+        print(f"  {r.name:24} PASS  max_abs={r.max_abs:.3e}")
 
-    if failures:
-        print(f"\nFAILED: {failures}")
+    summary = parity.summarize(results)
+    if not summary["all_passed"]:
+        print(f"\nFAILED: {summary['passed']}/{summary['total']}")
         return 1
 
-    print(f"\nOK - {len(SHAPES)} shapes, conversion + parity clean")
+    print(
+        f"\nOK - {summary['total']} cases, conversion + parity clean "
+        f"(worst {summary['worst_case']}, max_abs {summary['max_abs_error']:.3e})"
+    )
     return 0
 
 
