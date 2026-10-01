@@ -40,6 +40,11 @@ Containerization is not set up. Run against the interpreter directly.
 The `agent/` layer handles the long tail deterministic conversion misses
 and is removable: delete it and the product still works.
 
+Converted code is executed in a separate process under a wall-clock
+timeout. That is process containment, not a security sandbox: there is no
+seccomp, no namespace, and the child inherits the same user and filesystem
+access. It stops accidental damage, not adversarial code.
+
 ## Status
 
 Deterministic stages are done and tested on CPU:
@@ -51,10 +56,10 @@ Deterministic stages are done and tested on CPU:
 | PyTorch AST rewriting | `core/torch_rewriter.py` | done |
 | Parity harness | `verify/parity.py` | 40/40 cases pass on CPU |
 | Benchmarking | `bench/bench.py` | done, noise-calibrated verdicts |
+| Sandboxed execution | `core/runner.py` | done, process-isolated with timeout |
 | Report | `report/report.py` | done |
 
-Not yet done: `core/runner.py` (subprocess isolation), the `agent/`
-layer, and `ui/app.py`.
+Not yet done: `core/coverage.py`, the `agent/` layer, and `ui/app.py`.
 
 ROCm has not been executed. Everything above was verified on a CPU-only
 PyTorch build, so the AMD-specific claims are unproven until the code runs

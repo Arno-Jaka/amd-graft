@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from graft import config
 from graft.bench import telemetry
+from graft.core import runner
 from graft.core.converter import MigrationResult, Verdict
 
 NOT_MEASURED = "not measured"
@@ -36,6 +37,7 @@ class ReportInputs:
     parity_results: list | None = None
     benchmarks: list[dict] = field(default_factory=list)
     telemetry_snapshot: dict | None = None
+    execution: runner.ExecutionResult | None = None
     skipped_notes: list[str] = field(default_factory=list)
 
 
@@ -155,6 +157,44 @@ def _benchmark_section(inputs: ReportInputs) -> list[str]:
     return lines
 
 
+def _entry_ok(entry) -> bool:
+    """Read the ok flag from a dict or an attribute-bearing stub."""
+    if isinstance(entry, dict):
+        return bool(entry.get("ok"))
+    return bool(getattr(entry, "ok", False))
+
+
+def failed_entries(results) -> int:
+    return sum(1 for entry in results or [] if not _entry_ok(entry))
+
+
+def _execution_section(inputs: ReportInputs) -> list[str]:
+    execution = inputs.execution
+    lines = ["## Execution", ""]
+    if execution is None:
+        lines += [f"{NOT_MEASURED} (ported code was not executed).", ""]
+    else:
+        state = "OK" if execution.ok else "FAILED"
+        lines += [
+            f"**{state}** — {execution.summary()}",
+            "",
+            f"- Exit code: {execution.exit_code if execution.exit_code is not None else 'n/a'}",
+            f"- Timed out: {execution.timed_out}",
+        ]
+        if execution.protocol_error:
+            lines.append(f"- Protocol error: {execution.protocol_error}")
+        if execution.error_message and not execution.ok:
+            lines.append(f"- Error: {execution.error_message}")
+        lines.append("")
+
+    # Stated unconditionally. The isolation in force is process-level, and
+    # a reader who assumes a real sandbox would over-trust this report.
+    lines += ["### Isolation", ""]
+    lines += [f"- {note}" for note in runner.sandbox_notes()]
+    lines.append("")
+    return lines
+
+
 def _readiness(inputs: ReportInputs) -> list[str]:
     """Downgrade rather than omit anything that was not measured."""
     blockers: list[str] = []
@@ -162,10 +202,21 @@ def _readiness(inputs: ReportInputs) -> list[str]:
 
     if migration is None:
         blockers.append("Conversion was not run.")
+    elif not migration.converted:
+        blockers.append("Conversion produced no ported source.")
     elif migration.coverage.verdict is not Verdict.PRODUCTION_READY:
         blockers.append(
             f"Conversion verdict: {_verdict_line(migration.coverage.verdict)}"
         )
+
+    execution = inputs.execution
+    if execution is None:
+        blockers.append("Ported code was not executed.")
+    elif not execution.ok:
+        blockers.append(f"Execution failed: {execution.summary()}")
+    elif failed_entries(execution.results):
+        failed = failed_entries(execution.results)
+        blockers.append(f"{failed} case(s) raised during execution.")
 
     if inputs.parity is None:
         blockers.append("Parity was not measured.")
@@ -217,6 +268,7 @@ def render(inputs: ReportInputs) -> str:
         "",
     ]
     lines += _conversion_section(inputs.migration)
+    lines += _execution_section(inputs)
     lines += _parity_section(inputs)
     lines += _benchmark_section(inputs)
     lines += _readiness(inputs)
