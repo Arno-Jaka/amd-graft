@@ -71,9 +71,19 @@ def test_ptx_downgrades_to_manual_port():
     assert convert(src, Path("m.py")).coverage.verdict is Verdict.MANUAL_PORT
 
 
-def test_nvcc_flags_downgrade_to_manual_port():
-    src = 'import torch\ncmd = "nvcc -gencode arch=compute_90"\n'
-    assert convert(src, Path("m.py")).coverage.verdict is Verdict.MANUAL_PORT
+def test_nvcc_flags_are_reported_but_not_a_blocker():
+    """Build flags need translation, not a hand rewrite of the kernel.
+
+    Was asserted as MANUAL_PORT while coverage scoring was still a flag
+    check. Under the current severity model an -gencode flag is INFO: the
+    source translates cleanly and only the build command changes, so
+    capping the verdict at manual_port overstated the work required.
+    """
+    result = convert(
+        'import torch\ncmd = "nvcc -gencode arch=compute_90"\n', Path("m.py")
+    )
+    assert any("NVCC" in f or "nvcc" in f for f in result.coverage.findings)
+    assert result.coverage.verdict is Verdict.PRODUCTION_READY
 
 
 def test_config_import_prepended_once(example_source):

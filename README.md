@@ -37,6 +37,11 @@ Containerization is not set up. Run against the interpreter directly.
     input -> detector -> converter (hipify | ast) -> runner
           -> parity (reference vs port) -> bench -> report -> UI
 
+Every finding carries a severity: `blocker` (no mechanical translation
+exists, a human must rewrite it), `review` (a translation exists but the
+semantics are not provably equivalent on AMD), or `info` (worth knowing,
+changes no verdict). The worst severity present caps the verdict.
+
 The `agent/` layer handles the long tail deterministic conversion misses
 and is removable: delete it and the product still works.
 
@@ -57,9 +62,10 @@ Deterministic stages are done and tested on CPU:
 | Parity harness | `verify/parity.py` | 40/40 cases pass on CPU |
 | Benchmarking | `bench/bench.py` | done, noise-calibrated verdicts |
 | Sandboxed execution | `core/runner.py` | done, process-isolated with timeout |
+| Coverage scoring | `core/coverage.py` | done, blocker/review/info severities |
 | Report | `report/report.py` | done |
 
-Not yet done: `core/coverage.py`, the `agent/` layer, and `ui/app.py`.
+Not yet done: the `agent/` layer and `ui/app.py`.
 
 ROCm has not been executed. Everything above was verified on a CPU-only
 PyTorch build, so the AMD-specific claims are unproven until the code runs

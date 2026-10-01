@@ -183,6 +183,55 @@ def test_unmapped_symbols_are_surfaced(full_inputs):
     assert "Triton unsupported" in text
 
 
+def test_findings_are_grouped_by_severity(full_inputs):
+    """The reader needs to see how much work is left, not a flat list."""
+    from graft.core.coverage import Finding, Severity
+
+    inputs = copy.deepcopy(full_inputs)
+    inputs.migration.coverage.unmapped = [
+        Finding(
+            Severity.BLOCKER,
+            "ptx",
+            "inline PTX",
+            4,
+            "no HIP equivalent",
+            "rewrite with MFMA intrinsics",
+        ).to_dict(),
+        Finding(
+            Severity.REVIEW,
+            "shuffle",
+            "warp shuffle",
+            9,
+            "masks differ",
+            "verify lane indices",
+        ).to_dict(),
+        Finding(
+            Severity.INFO,
+            "nvcc_flags",
+            "gencode flag",
+            1,
+            "flags differ",
+            "use --offload-arch",
+        ).to_dict(),
+    ]
+    text = report.render(inputs)
+    assert "#### Blockers" in text
+    assert "#### Needs review" in text
+    assert "#### Notes" in text
+    assert "rewrite with MFMA intrinsics" in text
+
+
+def test_finding_without_severity_is_still_shown(full_inputs):
+    """Missing metadata must not silently hide a finding."""
+    inputs = copy.deepcopy(full_inputs)
+    inputs.migration.coverage.unmapped = [
+        {"symbol": "mystery", "line": 3, "reason": "unclassified risk"}
+    ]
+    text = report.render(inputs)
+    assert "`mystery`" in text
+    assert "unclassified risk" in text
+
+
 def test_skipped_notes_become_blockers(full_inputs):
     inputs = copy.deepcopy(full_inputs)
     inputs.skipped_notes = ["HIPIFY backend not wired up."]

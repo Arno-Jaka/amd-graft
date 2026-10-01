@@ -78,16 +78,41 @@ def _conversion_section(migration: MigrationResult | None) -> list[str]:
         text = f"- `{symbol}`{where}"
         lines.append(f"{text}: {reason}" if reason else text)
 
-    if migration.coverage.unmapped:
-        lines += ["", "### Unmapped (require human attention)", ""]
-        for item in migration.coverage.unmapped:
-            symbol = item.get("symbol", "?") if isinstance(item, dict) else str(item)
-            reason = ""
-            if isinstance(item, dict):
+    items = migration.coverage.unmapped
+    if items:
+        lines += ["", "### Coverage findings", ""]
+        # Grouped by severity so the reader sees how much work is actually
+        # left: a blocker means a rewrite, a review means verification.
+        for level, heading in (
+            ("blocker", "Blockers — no mechanical translation exists"),
+            ("review", "Needs review — translation exists, verify semantics"),
+            ("info", "Notes — worth knowing, changes no verdict"),
+        ):
+            group = [
+                item
+                for item in items
+                if isinstance(item, dict)
+                # An item with no severity predates the severity model.
+                # Defaulted to review rather than dropped: silently hiding
+                # a finding because it lacked metadata is the exact
+                # failure mode this section exists to prevent.
+                and item.get("severity", "review") == level
+            ]
+            if not group:
+                continue
+            lines += [f"#### {heading}", ""]
+            for item in group:
+                symbol = item.get("symbol", "?")
+                line = item.get("line")
+                where = f" (line {line})" if line else ""
                 reason = item.get("reason") or item.get("note") or ""
-            lines.append(f"- `{symbol}`" + (f" — {reason}" if reason else ""))
+                lines.append(f"- `{symbol}`{where}: {reason}")
+                fix = item.get("remediation")
+                if fix:
+                    lines.append(f"  - fix: {fix}")
+            lines.append("")
     else:
-        lines += ["", "### Unmapped", "", "None."]
+        lines += ["", "### Coverage findings", "", "None."]
 
     if migration.notes:
         lines += ["", "### Notes", ""]

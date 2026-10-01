@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from . import detector, hipify_backend, torch_rewriter
+from . import coverage, detector, hipify_backend, torch_rewriter
 from .detector import Route
 
 
@@ -46,15 +46,23 @@ class MigrationResult:
 
 
 def _apply_verdict(result: MigrationResult) -> None:
-    route = result.route
-    if route is None:
+    """Score the ported source and set the verdict from real findings.
+
+    Scans the ported text rather than the route flags. The route records
+    what was in the INPUT; the question here is what survived INTO the
+    output, and those differ once a backend has rewritten things.
+    """
+    if not result.ported_source:
         return
-    if route.has_ptx or route.has_cutlass or route.has_nvcc:
-        result.coverage.verdict = Verdict.MANUAL_PORT
-    elif result.coverage.unmapped:
-        result.coverage.verdict = Verdict.NEEDS_REVIEW
-    else:
-        result.coverage.verdict = Verdict.PRODUCTION_READY
+
+    assessment = coverage.assess(result.ported_source)
+    result.coverage.findings = [
+        finding.reason for finding in assessment.findings
+    ] + result.coverage.findings
+    result.coverage.unmapped = [
+        finding.to_dict() for finding in assessment.findings
+    ] or result.coverage.unmapped
+    result.coverage.verdict = Verdict(assessment.verdict)
 
 
 def _convert_cuda_cpp(result: MigrationResult, route: Route) -> MigrationResult:
@@ -75,8 +83,11 @@ def _convert_cuda_cpp(result: MigrationResult, route: Route) -> MigrationResult:
     result.ported_source = hipified.source
     result.backend = hipified.backend
     result.changes = hipified.changes
-    result.coverage.unmapped = hipified.unmapped
-    result.coverage.findings = route.notes
+    # Backend findings are merged, not replaced. The scanner re-reads the
+    # ported source and finds most of the same things, but the backend knows
+    # intent that a regex cannot recover; dropping its notes would lose the
+    # reason a construct was flagged. _apply_verdict replaces unmapped with
+    # the scanner output, which carries the same symbols at higher fidelity.
     result.notes = [*hipified.notes, *result.notes]
     result.notes.append(f"build with: {hipify_backend.build_command()}")
 
@@ -108,7 +119,6 @@ def convert(source: str, path: Path | None = None) -> MigrationResult:
     result.ported_source = ported
     result.backend = "ast"
     result.changes = log.changes
-    result.coverage.unmapped = log.unmapped
     result.coverage.findings = route.notes
 
     if "GPU_DEVICE_INDEX" in ported and "from graft.config import" not in ported:
