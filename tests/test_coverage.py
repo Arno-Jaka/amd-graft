@@ -122,6 +122,21 @@ def test_line_numbers_point_at_real_lines():
     assert findings[0].line == 4
 
 
+def test_finding_records_the_literal_text_it_matched():
+    """A human label is prose; the literal is what you search for."""
+    findings = coverage.scan(SHFL_SOURCE)
+    shuffle = [f for f in findings if f.category == "shuffle"]
+    assert shuffle
+    assert shuffle[0].matched_text == "__shfl_xor_sync"
+    assert shuffle[0].symbol == "warp shuffle intrinsic"
+
+
+def test_matched_text_is_serialised_for_the_agent():
+    payload = coverage.scan(SHFL_SOURCE)[0].to_dict()
+    assert payload["matched_text"]
+    assert payload["matched_text"] != payload["symbol"] or payload["symbol"]
+
+
 def test_every_finding_carries_a_reason_and_a_fix():
     for source in (PTX_SOURCE, SHFL_SOURCE, WARP_SOURCE, CUTLASS_SOURCE):
         for finding in coverage.scan(source):

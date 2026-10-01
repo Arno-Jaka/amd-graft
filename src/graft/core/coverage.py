@@ -52,12 +52,20 @@ class Finding:
     line: int
     reason: str
     remediation: str = ""
+    matched_text: str = ""
+    """The source text the rule actually matched, e.g. `__shfl_xor_sync`.
+
+    `symbol` is a human label ("warp shuffle intrinsic") useful in prose.
+    This is the literal, which is what someone needs in order to search
+    for the construct or write the replacement. Populated by scan().
+    """
 
     def to_dict(self) -> dict:
         return {
             "severity": str(self.severity),
             "category": self.category,
             "symbol": self.symbol,
+            "matched_text": self.matched_text or self.symbol,
             "line": self.line,
             "reason": self.reason,
             "note": self.reason,
@@ -191,6 +199,7 @@ def _scan(source: str, rules, severity: Severity) -> list[Finding]:
                     line=line,
                     reason=reason,
                     remediation=remediation,
+                    matched_text=match.group(0),
                 )
             )
     return findings

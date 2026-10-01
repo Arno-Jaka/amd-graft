@@ -14,9 +14,21 @@ PROJECT_NAME = "Graft"
 
 EXAMPLES_DIR = PROJECT_ROOT / "examples"
 
+# LLM endpoint, typically vLLM on the AMD instance. Blank values mean the
+# agent layer is disabled, which must leave the product fully working; see
+# agent/agent.py for why that is the required behaviour rather than a
+# convenience.
 LLM_MODEL = ""
 LLM_BASE_URL = ""
-LLM_API_KEY_ENV = ""
+LLM_API_KEY_ENV = "VLLM_API_KEY"
+
+# Placeholder key for a local vLLM server, which usually runs without auth.
+# Agno raises rather than defaulting, so one is supplied here. This is not
+# a credential and grants nothing.
+LLM_PLACEHOLDER_API_KEY = "local"
+
+AGENT_ENABLED = True
+AGENT_MAX_TOOL_CALLS = 8
 
 SUBPROCESS_TIMEOUT_S = 120
 BENCH_WARMUP_ITERS = 5
