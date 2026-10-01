@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from . import detector, torch_rewriter
+from . import detector, hipify_backend, torch_rewriter
 from .detector import Route
 
 
@@ -57,17 +57,47 @@ def _apply_verdict(result: MigrationResult) -> None:
         result.coverage.verdict = Verdict.PRODUCTION_READY
 
 
+def _convert_cuda_cpp(result: MigrationResult, route: Route) -> MigrationResult:
+    """CUDA C++ to HIP via the hipify backend.
+
+    Inline PTX has no mechanical translation, so it short-circuits to
+    MANUAL_PORT before any renaming happens. Renaming around PTX would
+    produce a file that compiles and is still wrong.
+    """
+    if route.has_ptx:
+        result.coverage.verdict = Verdict.MANUAL_PORT
+        result.notes.append(
+            "inline PTX detected: no mechanical translation to HIP exists"
+        )
+        return result
+
+    hipified = hipify_backend.translate(result.original_source, result.source_path)
+    result.ported_source = hipified.source
+    result.backend = hipified.backend
+    result.changes = hipified.changes
+    result.coverage.unmapped = hipified.unmapped
+    result.coverage.findings = route.notes
+    result.notes = [*hipified.notes, *result.notes]
+    result.notes.append(f"build with: {hipify_backend.build_command()}")
+
+    _apply_verdict(result)
+    return result
+
+
 def convert(source: str, path: Path | None = None) -> MigrationResult:
     route = detector.detect(path, source)
     result = MigrationResult(source_path=path, original_source=source, route=route)
 
-    if route.lang in (detector.Lang.CUDA_CPP, detector.Lang.TRITON):
+    if route.lang is detector.Lang.TRITON:
         result.coverage.verdict = Verdict.UNSUPPORTED
         result.notes.append(
-            "HIPIFY conversion is not wired up yet; "
-            "use the PyTorch path or wait for stage 1 completion"
+            "Triton conversion is not supported: AMD needs the "
+            "triton-windows or ROCm-native path, which is a separate port"
         )
         return result
+
+    if route.lang is detector.Lang.CUDA_CPP:
+        return _convert_cuda_cpp(result, route)
 
     if route.lang is detector.Lang.UNKNOWN:
         result.coverage.verdict = Verdict.UNSUPPORTED

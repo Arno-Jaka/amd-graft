@@ -51,15 +51,34 @@ WARP_LITERAL_RE = re.compile(r"\b(32|64)\b")
 CPP_SUFFIXES = {".cu", ".cuh", ".cpp", ".cc", ".hpp", ".h"}
 
 
+CUDA_CPP_MARKERS = (
+    "__global__",
+    "__device__",
+    "<<<",
+    "cuda_runtime.h",
+    "cudaMalloc",
+    "blockIdx",
+)
+
+
 def detect(path: Path | None, source: str) -> Route:
     route = Route(lang=Lang.UNKNOWN, path=path)
 
-    if path is not None and path.suffix.lower() in CPP_SUFFIXES:
+    suffix_is_cpp = path is not None and path.suffix.lower() in CPP_SUFFIXES
+    content_is_cpp = any(marker in source for marker in CUDA_CPP_MARKERS)
+
+    # Extension is not sufficient on its own: pasted snippets arrive with no
+    # path, and a .py wrapper can still contain raw CUDA. Content wins when
+    # the two disagree, because compiling the wrong route wastes more time
+    # than a misclassification here.
+    if (suffix_is_cpp and not TRITON_RE.search(source)) or content_is_cpp:
         route.lang = Lang.CUDA_CPP
     elif TRITON_RE.search(source):
         route.lang = Lang.TRITON
     elif "torch" in source:
         route.lang = Lang.PYTORCH_PYTHON
+    elif suffix_is_cpp:
+        route.lang = Lang.CUDA_CPP
 
     route.uses_cuda_api = "torch.cuda" in source
     route.cuda_symbols = sorted(set(CUDA_API_RE.findall(source)))

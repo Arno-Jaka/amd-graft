@@ -27,7 +27,10 @@ Single file in. No repository ingestion.
 
 ## Install
 
-    docker compose up
+    uv sync
+    uv run pytest tests -q
+
+Containerization is not set up. Run against the interpreter directly.
 
 ## Architecture
 
@@ -39,4 +42,20 @@ and is removable: delete it and the product still works.
 
 ## Status
 
-Stage 1 in progress.
+Deterministic stages are done and tested on CPU:
+
+| Stage | Module | State |
+| --- | --- | --- |
+| Detection | `core/detector.py` | done |
+| CUDA C++ to HIP | `core/hipify_backend.py` | done, table fallback verified |
+| PyTorch AST rewriting | `core/torch_rewriter.py` | done |
+| Parity harness | `verify/parity.py` | 40/40 cases pass on CPU |
+| Benchmarking | `bench/bench.py` | done, noise-calibrated verdicts |
+| Report | `report/report.py` | done |
+
+Not yet done: `core/runner.py` (subprocess isolation), the `agent/`
+layer, and `ui/app.py`.
+
+ROCm has not been executed. Everything above was verified on a CPU-only
+PyTorch build, so the AMD-specific claims are unproven until the code runs
+on real hardware.

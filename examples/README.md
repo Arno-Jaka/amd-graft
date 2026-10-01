@@ -22,6 +22,7 @@ equal footing.
 | File | Exercises |
 | --- | --- |
 | `01_torch_cuda_softmax.py` | `torch.cuda.*` call surface, device resolution, hand-rolled softmax reduction |
+| `02_cuda_add_kernel.cu` | CUDA C++ route: runtime API renaming, headers, `<<<>>>` launches, shared-memory reduction |
 
 ## Planned
 

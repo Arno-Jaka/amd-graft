@@ -41,12 +41,16 @@ def test_changes_are_line_attributed(example_source):
         assert change["reason"]
 
 
-def test_cuda_cpp_routes_to_unsupported_not_crash():
+def test_trivial_cuda_cpp_converts_without_renames():
+    """A .cu file with no CUDA API surface still routes to the HIP backend.
+
+    Superseded the old 'CUDA is unsupported' expectation: that stage is
+    implemented, so asserting otherwise would lock in a false limitation.
+    """
     result = convert("__global__ void k() {}", Path("m.cu"))
-    assert result.coverage.verdict is Verdict.UNSUPPORTED
-    assert result.backend == "none"
-    assert result.converted is False
-    assert result.notes
+    assert result.backend in ("table", "hipify-perl")
+    assert result.converted is True
+    assert result.changes == []
 
 
 def test_triton_routes_to_unsupported():
