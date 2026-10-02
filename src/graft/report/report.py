@@ -64,14 +64,46 @@ def _verdict_line(verdict) -> str:
     return labels.get(verdict, str(verdict))
 
 
-def _conversion_section(migration: MigrationResult | None) -> list[str]:
+def _verdict_basis(migration: MigrationResult, parity: dict | None) -> str:
+    """What evidence the conversion verdict actually rests on.
+
+    A verdict is only as strong as the thing behind it, and for the two
+    routes those things are not comparable. The PyTorch route can be
+    backed by parity cases that were compiled and executed. The CUDA C++
+    route cannot: Graft rewrites the text and nobody has built it, so
+    "production ready" there means "no unmapped constructs found", which
+    is a scan rather than a proof.
+
+    Printed next to the verdict so the word carries its evidence. Without
+    this, a skim of the Conversion section suggests a stronger result than
+    the run performed, even though the Readiness section downgrades it
+    correctly further down.
+    """
+    route = migration.route.lang if migration.route else ""
+
+    if route == "cuda_cpp":
+        return "text analysis only - not compiled, not executed"
+
+    if parity and parity.get("total"):
+        passed, total = parity.get("passed", 0), parity["total"]
+        if passed == total:
+            return f"AST analysis, {passed}/{total} parity cases executed"
+        return f"AST analysis, {passed}/{total} parity cases passed"
+
+    return "AST analysis only - not executed"
+
+
+def _conversion_section(
+    migration: MigrationResult | None, parity: dict | None = None
+) -> list[str]:
     if migration is None:
         return ["## Conversion", "", f"{NOT_MEASURED} (no conversion run).", ""]
 
     lines = [
         "## Conversion",
         "",
-        f"- Verdict: {_verdict_line(migration.coverage.verdict)}",
+        f"- Verdict: {_verdict_line(migration.coverage.verdict)}"
+        f" ({_verdict_basis(migration, parity)})",
         f"- Route: {migration.route.lang if migration.route else 'unknown'}",
         f"- Backend: {migration.backend}",
         f"- Changes applied: {len(migration.changes)}",
@@ -357,7 +389,7 @@ def render(inputs: ReportInputs) -> str:
         f"- Peak VRAM: {_fmt(snapshot.get('peak_vram_mb'), '{:.1f}', 'n/a')} MB",
         "",
     ]
-    lines += _conversion_section(inputs.migration)
+    lines += _conversion_section(inputs.migration, inputs.parity)
     lines += _execution_section(inputs)
     lines += _parity_section(inputs)
     lines += _benchmark_section(inputs)

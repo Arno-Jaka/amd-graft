@@ -314,3 +314,58 @@ def test_speedup_comparison_renders(full_inputs):
     text = report.render(inputs)
     assert "12.5x" in text
     assert "device vs CPU" in text
+
+
+# --- what the verdict is based on -----------------------------------------
+
+
+def _conversion_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("- Verdict:"):
+            return line
+    raise AssertionError(f"no verdict line in:\n{text}")
+
+
+def test_cuda_cpp_verdict_admits_it_was_only_a_text_scan():
+    """A .cu file is never compiled by Graft, so a bare pass would overstate it."""
+    result = converter.convert(
+        (config.EXAMPLES_DIR / "02_cuda_add_kernel.cu").read_text()
+    )
+    text = report.render(report.ReportInputs(migration=result))
+    line = _conversion_line(text)
+    assert "PRODUCTION READY" in line
+    assert "text analysis only" in line
+    assert "not compiled" in line
+
+
+def test_pytorch_verdict_cites_executed_parity(full_inputs):
+    text = report.render(full_inputs)
+    line = _conversion_line(text)
+    assert "40/40 parity cases executed" in line
+
+
+def test_verdict_basis_reports_partial_parity(full_inputs):
+    inputs = copy.deepcopy(full_inputs)
+    inputs.parity = {**inputs.parity, "passed": 38, "total": 40, "all_passed": False}
+    line = _conversion_line(report.render(inputs))
+    assert "38/40 parity cases passed" in line
+
+
+def test_unexecuted_pytorch_verdict_says_so():
+    result = converter.convert(
+        (config.EXAMPLES_DIR / "01_torch_cuda_softmax.py").read_text()
+    )
+    line = _conversion_line(report.render(report.ReportInputs(migration=result)))
+    assert "AST analysis only" in line
+    assert "not executed" in line
+
+
+def test_verdict_basis_never_claims_more_than_was_run():
+    """A passing verdict must still name its weakest supporting step."""
+    for path, expected in (
+        ("01_torch_cuda_softmax.py", "not executed"),
+        ("02_cuda_add_kernel.cu", "not compiled"),
+    ):
+        source = (config.EXAMPLES_DIR / path).read_text()
+        text = report.render(report.ReportInputs(migration=converter.convert(source)))
+        assert expected in _conversion_line(text), path
