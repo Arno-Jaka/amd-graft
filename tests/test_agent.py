@@ -92,20 +92,69 @@ def test_agent_can_be_disabled_entirely(monkeypatch):
     assert agent.build_agent() is None
 
 
-def test_deterministic_layers_do_not_import_the_agent():
-    """core/, verify/, bench/ must not depend on this directory.
+# The one module allowed to reference the agent. It is the composition
+# root that assembles the stages, so it must be able to ask for a
+# narrative; it imports lazily inside a function so that a missing agent
+# layer still leaves the deterministic path usable.
+COMPOSITION_ROOT = {"pipeline.py"}
 
-    Checked by reading the source rather than by importing, since an import
-    inside a function body would not show up in sys.modules.
+
+def _imports_agent(text: str) -> bool:
+    """True when the source really imports the agent, not merely says so.
+
+    Parsed rather than grepped: a docstring explaining that a module does
+    *not* import the agent would otherwise be reported as an offender.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.startswith("graft.agent") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "graft.agent"
+        ):
+            return True
+    return False
+
+
+def test_deterministic_layers_do_not_import_the_agent():
+    """core/, verify/, bench/, report/ must not depend on this directory.
+
+    Only the composition root may, and it is the single exception. If
+    anything else imports the agent, removing the directory breaks the
+    product and the layering claim in agent.py is false.
     """
     offenders = []
     for path in Path(config.PACKAGE_ROOT).rglob("*.py"):
-        if "agent" in path.parts:
+        relative = str(path.relative_to(config.PACKAGE_ROOT))
+        if "agent" in path.parts or relative in COMPOSITION_ROOT:
             continue
-        text = path.read_text()
-        if "from graft.agent" in text or "import agent" in text:
-            offenders.append(str(path.relative_to(config.PACKAGE_ROOT)))
+        if _imports_agent(path.read_text()):
+            offenders.append(relative)
     assert offenders == [], f"deterministic layers import the agent: {offenders}"
+
+
+def test_composition_root_imports_the_agent_lazily():
+    """Even pipeline.py must not import it at module scope.
+
+    A top-level import would make `import graft.pipeline` fail outright
+    once agent/ is deleted, which is the thing the layering test guards.
+    """
+    text = (Path(config.PACKAGE_ROOT) / "pipeline.py").read_text()
+    tree = __import__("ast").parse(text)
+    top_level = [
+        node
+        for node in tree.body
+        if isinstance(node, (__import__("ast").Import, __import__("ast").ImportFrom))
+    ]
+    assert not any("agent" in __import__("ast").dump(node) for node in top_level), (
+        "pipeline.py imports the agent at module scope"
+    )
 
 
 def test_product_works_with_agent_directory_deleted():
@@ -114,6 +163,17 @@ def test_product_works_with_agent_directory_deleted():
     Copies the package, removes agent/, and runs the full suite plus an
     end-to-end convert-verify-report in the copy. If this fails, the claim
     that the agent is removable is false.
+
+    Two details make this test honest rather than decorative.
+
+    PYTHONPATH points at the clone's own src. Without it the subprocess
+    imports graft through the editable install, which still points at the
+    original checkout, so the copy silently keeps a working agent/ and the
+    test passes while proving nothing. The assertion below catches exactly
+    that failure mode.
+
+    This file is excluded from the inner run because it copies the tree
+    again; including it would recurse without end.
     """
     import tempfile
 
@@ -133,9 +193,30 @@ def test_product_works_with_agent_directory_deleted():
             "PATH": "/usr/bin:/bin",
             "HOME": str(Path.home()),
             "VIRTUAL_ENV": str(config.PROJECT_ROOT / ".venv"),
+            "PYTHONPATH": str(clone / "src"),
         }
-        # Ignore this file: it copies the tree and runs pytest inside the
-        # copy, which without --ignore would recurse without end.
+
+        # Prove the copy is what actually runs before trusting its result.
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import graft, pathlib;"
+                "print(pathlib.Path(graft.__file__).resolve());"
+                "import graft.agent",
+            ],
+            cwd=clone,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert probe.returncode != 0, (
+            "agent/ is still importable in the copy, so the deletion test "
+            f"proves nothing; graft resolved to {probe.stdout.strip()}"
+        )
+        assert str(clone / "src") in probe.stdout
+
         suite = subprocess.run(
             [
                 sys.executable,
@@ -154,26 +235,20 @@ def test_product_works_with_agent_directory_deleted():
         assert suite.returncode == 0, suite.stdout[-2000:]
 
         script = (
-            "from graft.core import converter, runner\n"
+            "import importlib.util\n"
+            "from graft.core import converter\n"
             "from graft.report import report\n"
             "from graft.verify import cases, parity\n"
             "from graft import config\n"
             "p = config.EXAMPLES_DIR / '01_torch_cuda_softmax.py'\n"
             "mig = converter.convert(p.read_text(), p)\n"
-            "res = parity.summarize(parity_results)\n"
-            "print('OK', res['passed'], res['total'])\n"
-        )
-        # Replace the placeholder line with a real invocation.
-        script = script.replace(
-            "res = parity.summarize(parity_results)",
-            "import importlib.util\n"
             "s = importlib.util.spec_from_file_location('m', p)\n"
             "m = importlib.util.module_from_spec(s)\n"
             "s.loader.exec_module(m)\n"
-            "out = parity.check(m, cases.generate())\n"
-            "res = parity.summarize(out)\n"
+            "res = parity.summarize(parity.check(m, cases.generate()))\n"
             "txt = report.render(report.ReportInputs(migration=mig, parity=res))\n"
-            "assert '## Readiness' in txt",
+            "assert '## Readiness' in txt\n"
+            "print('OK', res['passed'], res['total'])\n"
         )
         run = subprocess.run(
             [sys.executable, "-c", script],
@@ -510,3 +585,102 @@ def test_absent_narrative_says_so_and_is_not_a_blocker():
     text = render(ReportInputs())
     assert "No narrative generated" in text
     assert "does not affect the verdict" in text
+
+
+# --- production wiring ----------------------------------------------------
+
+
+def test_unavailable_reason_is_never_blank_when_the_model_cannot_build(monkeypatch):
+    """A blank reason produces blank prose under a generated-by-a-model heading.
+
+    Both endpoint variables set used to be enough for unavailable_reason()
+    to return "", so a missing backend silently yielded empty sections.
+    """
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen")
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setattr(agent, "build_model", lambda: None)
+    monkeypatch.setattr(agent, "_model_error", "vLLM backend unavailable: no openai")
+
+    reason = agent.unavailable_reason()
+    assert reason
+    assert reason.startswith(agent.NOT_AVAILABLE)
+    assert "no openai" in reason
+
+
+def test_is_available_is_false_when_the_model_cannot_be_built(monkeypatch):
+    """Endpoint configured is not the same as a usable model."""
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen")
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setattr(agent, "build_model", lambda: None)
+    assert agent.is_available() is False
+
+
+def test_disabled_agent_is_named_in_the_reason(monkeypatch):
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen")
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setattr(config, "AGENT_ENABLED", False)
+    assert "AGENT_ENABLED" in agent.unavailable_reason()
+
+
+def test_model_call_is_bounded_by_a_timeout():
+    """A caller-supplied timeout must actually interrupt a hung run."""
+
+    class Hangs:
+        def run(self, prompt):
+            import time
+
+            time.sleep(30)
+
+    result = agent._run(Hangs(), "prompt", timeout=0.2)
+    assert result.startswith(agent.NOT_AVAILABLE)
+    assert "timed out" in result
+
+
+def test_tool_call_limit_is_enforced_at_the_tool_boundary():
+    """Agno has no cap of its own, so Graft enforces one."""
+    tools.TOOLS.clear()
+    capped = {tool.name: tool for tool in tools.build_tools(max_calls=2)}
+    try:
+        assert capped["describe_coverage"].entrypoint("int x;")
+        assert capped["describe_coverage"].entrypoint("int x;")
+        with pytest.raises(tools.ToolBudgetExceeded):
+            capped["describe_coverage"].entrypoint("int x;")
+    finally:
+        tools.TOOLS.clear()
+        tools.build_tools()
+
+
+def test_budgeted_tools_keep_their_schemas():
+    """The wrapper must not degrade a tool to an empty-args schema."""
+    tools.TOOLS.clear()
+    capped = {tool.name: tool for tool in tools.build_tools(max_calls=4)}
+    try:
+        assert capped["inspect_changes"].parameters["required"] == ["source"]
+        assert capped["suggest_test_shapes"].parameters["required"] == ["operation"]
+    finally:
+        tools.TOOLS.clear()
+        tools.build_tools()
+
+
+def test_model_test_case_proposals_are_not_discarded():
+    """An LLM proposal must be returned, not computed and thrown away."""
+    result = agent.propose_test_cases("softmax", agent=FakeAgent(reply="Try (3,17)."))
+    assert result["model_proposals"] == ["Try (3,17)."]
+    assert result["deterministic_suggestions"]
+
+
+def test_no_model_means_no_model_proposals(no_endpoint):
+    """With nothing to call, the model list is empty, not fabricated."""
+    result = agent.propose_test_cases("softmax")
+    assert result["model_proposals"] == []
+    assert result["deterministic_suggestions"]
+
+
+def test_report_does_not_claim_unavailable_prose_is_model_written():
+    from graft.report.report import ReportInputs, render
+
+    text = render(ReportInputs(narratives={"narration": "not available: no endpoint"}))
+    assert "LLM-generated" not in text
+    assert "## Narrative" in text
+    assert "No narrative generated" in text
+    assert "no endpoint" in text

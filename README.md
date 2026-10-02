@@ -46,17 +46,25 @@ The `agent/` layer handles the long tail deterministic conversion misses
 and is removable: delete it and the product still works. That claim is
 tested rather than asserted — `test_product_works_with_agent_directory_deleted`
 copies the tree, removes `agent/`, and runs the suite plus an end-to-end
-migration in the copy.
+migration in the copy. The copy is forced onto its own `src` path first,
+because otherwise the subprocess imports the original checkout through the
+editable install and the deletion silently never happens.
 
 The agent never decides correctness. It receives measured results through
-six read-only tools and narrates them; it cannot execute user code, and
-its output is rendered under a heading that says a language model wrote
-it. With no endpoint configured the narrative sections read "not
-available" and every measured section is unaffected.
+six read-only tools and narrates them; it cannot execute user code, and its
+output is rendered under a heading that says a language model wrote it.
+With no endpoint configured the section reads "no narrative generated" and
+every measured section is unaffected. Prose the agent could not obtain is
+never printed under a heading claiming a model wrote it.
 
-Set `LLM_MODEL` and `LLM_BASE_URL` to enable it. vLLM on the AMD instance
-is the intended target, which makes a self-hosted demo possible without an
-API key.
+`pipeline.run()` is the single entry point: convert, execute, verify,
+benchmark, narrate, render. Every stage is skippable and every skip is
+recorded in the report rather than silently dropped.
+
+Set `LLM_MODEL` and `LLM_BASE_URL` to enable the agent. Values come from
+the environment or from a `.env` file at the project root; see
+`.env.example`. vLLM on the AMD instance is the intended target, which
+makes a self-hosted demo possible without an API key.
 
 Converted code is executed in a separate process under a wall-clock
 timeout. That is process containment, not a security sandbox: there is no
@@ -77,10 +85,13 @@ Deterministic stages are done and tested on CPU:
 | Sandboxed execution | `core/runner.py` | done, process-isolated with timeout |
 | Coverage scoring | `core/coverage.py` | done, blocker/review/info severities |
 | Report | `report/report.py` | done |
-| Explanation layer | `agent/` | optional, needs an LLM endpoint |
+| Pipeline | `pipeline.py` | done, single entry point |
+| Explanation layer | `agent/` | done, optional, needs an LLM endpoint |
 
 Not yet done: `ui/app.py` and `main.py`.
 
 ROCm has not been executed. Everything above was verified on a CPU-only
 PyTorch build, so the AMD-specific claims are unproven until the code runs
-on real hardware.
+on real hardware. In particular, `hipify-perl` has never been invoked and
+`bench/` has never compared two runs on a GPU, so its noise bands are
+calibrated from CPU measurements and are probably too loose.

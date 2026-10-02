@@ -6,6 +6,7 @@ Every other module reads from here instead of hardcoding literals.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -14,21 +15,66 @@ PROJECT_NAME = "Graft"
 
 EXAMPLES_DIR = PROJECT_ROOT / "examples"
 
+DOTENV_PATH = PROJECT_ROOT / ".env"
+
+
+def _load_dotenv(path: Path = DOTENV_PATH) -> None:
+    """Populate os.environ from a .env file, without overriding the shell.
+
+    A dependency-free loader rather than python-dotenv: the file holds at
+    most a handful of settings, and the agent layer must stay optional.
+    Real environment variables win, so exporting a value in the shell still
+    overrides the file.
+    """
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # LLM endpoint, typically vLLM on the AMD instance. Blank values mean the
 # agent layer is disabled, which must leave the product fully working; see
 # agent/agent.py for why that is the required behaviour rather than a
-# convenience.
-LLM_MODEL = ""
-LLM_BASE_URL = ""
-LLM_API_KEY_ENV = "VLLM_API_KEY"
+# convenience. Read from the environment so a deployed instance can be
+# configured without editing code.
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").strip()
+
+# Name of the variable holding the API key, not the key itself. A local
+# vLLM server usually runs without auth, so this is often unset entirely.
+# Set LLM_API_KEY_ENV=VLLM_API_KEY for that convention.
+LLM_API_KEY_ENV = os.environ.get("LLM_API_KEY_ENV", "LLM_API_KEY").strip()
 
 # Placeholder key for a local vLLM server, which usually runs without auth.
 # Agno raises rather than defaulting, so one is supplied here. This is not
 # a credential and grants nothing.
 LLM_PLACEHOLDER_API_KEY = "local"
 
-AGENT_ENABLED = True
-AGENT_MAX_TOOL_CALLS = 8
+AGENT_ENABLED = _flag("AGENT_ENABLED", True)
+
+# Agno has no tool-call cap of its own, so the limit is enforced at the
+# tool boundary instead. See agent/tools.py.
+AGENT_MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "8"))
+
+# Seconds allowed for one model call. Enforced on the model object rather
+# than around agent.run(), so a hung server cannot stall the pipeline.
+AGENT_TIMEOUT_S = float(os.environ.get("AGENT_TIMEOUT_S", "60"))
 
 SUBPROCESS_TIMEOUT_S = 120
 BENCH_WARMUP_ITERS = 5

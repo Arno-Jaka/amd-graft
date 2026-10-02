@@ -49,11 +49,29 @@ def endpoint_configured() -> bool:
 
 
 def unavailable_reason() -> str:
+    """Why no model can be called, or "" when one can.
+
+    Never returns an empty string while the model is unusable. An earlier
+    version returned "" as soon as both endpoint variables were set, which
+    meant a missing backend produced blank narrative sections under a
+    heading claiming a language model wrote them.
+    """
     if not config.LLM_MODEL:
         return f"{NOT_AVAILABLE}: no LLM_MODEL configured"
     if not config.LLM_BASE_URL:
         return f"{NOT_AVAILABLE}: no LLM_BASE_URL configured"
+    if not config.AGENT_ENABLED:
+        return f"{NOT_AVAILABLE}: agent layer disabled by AGENT_ENABLED"
+
+    reason = _model_error
+    if reason:
+        return f"{NOT_AVAILABLE}: {reason}"
     return ""
+
+
+# Set when the vLLM backend cannot even be constructed, so the failure can
+# be explained instead of surfacing as an empty section.
+_model_error: str | None = None
 
 
 def build_model():
@@ -61,23 +79,37 @@ def build_model():
 
     vLLM is the target: an OpenAI-compatible server on the AMD instance,
     which is what makes a self-hosted demo possible without an API key.
+    The request timeout is set on the model, so a hung server fails as a
+    timeout rather than stalling the pipeline indefinitely.
     """
+    global _model_error
+    _model_error = None
+
     if not endpoint_configured():
         return None
 
     try:
         from agno.models.vllm import VLLM
-    except ImportError:
+    except ImportError as exc:
+        _model_error = f"vLLM backend unavailable: {exc}"
         return None
 
     api_key = (
-        os.environ.get(config.LLM_API_KEY_ENV, "") or config.LLM_PLACEHOLDER_API_KEY
+        os.environ.get(config.LLM_API_KEY_ENV, "").strip()
+        or config.LLM_PLACEHOLDER_API_KEY
     )
-    return VLLM(id=config.LLM_MODEL, base_url=config.LLM_BASE_URL, api_key=api_key)
+    return VLLM(
+        id=config.LLM_MODEL,
+        base_url=config.LLM_BASE_URL,
+        api_key=api_key,
+        timeout=config.AGENT_TIMEOUT_S,
+    )
 
 
 def build_agent():
     """Construct the agent, or None when it cannot be constructed."""
+    global _model_error
+
     if not config.AGENT_ENABLED:
         return None
 
@@ -87,14 +119,15 @@ def build_agent():
 
     try:
         from agno.agent import Agent
-    except ImportError:
+    except ImportError as exc:
+        _model_error = f"agno.agent unavailable: {exc}"
         return None
 
     return Agent(
         model=model,
         name="graft-narrator",
         instructions=GUARDRAIL,
-        tools=build_tools(),
+        tools=build_tools(config.AGENT_MAX_TOOL_CALLS),
         markdown=False,
         telemetry=False,
         retries=2,
@@ -107,6 +140,9 @@ def is_available() -> bool:
     The layering test: if this is False, the product still converts,
     verifies, benchmarks, and reports. Nothing in core/, verify/, bench/,
     or report/ imports this module.
+
+    Requires a model that can actually be constructed, not merely an
+    endpoint that is set, so the answer matches reality.
     """
     if not endpoint_configured():
         return False
@@ -114,7 +150,7 @@ def is_available() -> bool:
         import agno  # noqa: F401
     except ImportError:
         return False
-    return True
+    return build_model() is not None
 
 
 def _run(agent, prompt: str, timeout: float | None = None) -> str:
@@ -124,14 +160,30 @@ def _run(agent, prompt: str, timeout: float | None = None) -> str:
     caller cannot distinguish "the model said something unhelpful" from
     "the model did not answer", which is intentional: both render as a
     sentence in a report rather than as an exception.
+
+    ``timeout`` is a backstop for an agent object injected by a caller.
+    The default path bounds the request on the model itself, which is the
+    only place a hung server can actually be interrupted.
     """
     if agent is None:
-        return unavailable_reason()
+        return unavailable_reason() or f"{NOT_AVAILABLE}: no model available"
 
-    try:
-        response = agent.run(prompt)
-    except Exception as exc:  # every failure becomes text, never propagates
-        return f"{NOT_AVAILABLE}: {type(exc).__name__}: {exc}"
+    if timeout is not None:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeout
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                response = pool.submit(agent.run, prompt).result(timeout=timeout)
+            except FutureTimeout:
+                return f"{NOT_AVAILABLE}: timed out after {timeout:.0f}s"
+            except Exception as exc:  # every failure becomes text
+                return f"{NOT_AVAILABLE}: {type(exc).__name__}: {exc}"
+    else:
+        try:
+            response = agent.run(prompt)
+        except Exception as exc:  # every failure becomes text, never propagates
+            return f"{NOT_AVAILABLE}: {type(exc).__name__}: {exc}"
 
     content = getattr(response, "content", None)
     if isinstance(content, str) and content.strip():
@@ -259,8 +311,14 @@ def propose_remediation(unmapped: list[dict], agent=None) -> str:
     )
 
 
-def propose_test_cases(operation: str, agent=None) -> str:
-    """Propose additional parity inputs for the given operation."""
+def propose_test_cases(operation: str, agent=None) -> dict:
+    """Propose additional parity inputs for the given operation.
+
+    Returns both halves honestly labelled: deterministic shape candidates
+    that always exist, and the model's own proposal when an endpoint is
+    configured. Neither is mixed into the other, so a reader can tell
+    which list a shape came from.
+    """
     from .tools import existing_case_coverage, suggest_test_shapes
 
     current = existing_case_coverage()
@@ -271,9 +329,11 @@ def propose_test_cases(operation: str, agent=None) -> str:
         distributions=", ".join(current["distributions"]),
         shapes=", ".join(str(shape) for shape in current["shapes"]),
     )
-    _run(agent or build_agent(), prompt)
+    proposal = _run(agent or build_agent(), prompt)
+    model_proposals = [] if proposal.startswith(NOT_AVAILABLE) else [proposal]
     return {
         "deterministic_suggestions": suggestions,
+        "model_proposals": model_proposals,
         "note": (
             "Shape suggestions are generated deterministically, not by the "
             "model, so they exist even without an LLM endpoint."

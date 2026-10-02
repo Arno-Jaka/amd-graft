@@ -7,6 +7,8 @@ graft.config so this file runs unchanged on a CPU laptop and a ROCm GPU.
 Contract:
     solve(x_cpu) -> tensor   entry point, shape-generic, CPU tensor in/out
     kernel(x) -> tensor      device-resident, no transfers, benchmarkable
+    reference(x_cpu) -> t    independent reference for parity
+    arg                     module-level tensor the benchmark harness times
     OPERATION                key into the reference registry
 """
 
@@ -15,6 +17,12 @@ import torch
 from graft.config import resolve_device
 
 OPERATION = "softmax"
+
+# Input for benchmark.measure(). Kept at module scope on CPU so the
+# harness decides where it runs; a device-resident tensor here would pin
+# VRAM merely by importing this file. Shape matches the largest parity
+# case so the timed work is representative.
+arg = torch.randn(64, 512)
 
 
 def softmax(x):

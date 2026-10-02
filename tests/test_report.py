@@ -23,6 +23,19 @@ from graft.verify import cases, parity
 EXAMPLE = config.EXAMPLES_DIR / "01_torch_cuda_softmax.py"
 
 
+def readiness(text: str) -> str:
+    """Just the Readiness section.
+
+    Assertions about the overall verdict must be scoped to this. The
+    Conversion section states its own verdict independently, so searching
+    the whole document for a verdict string would confuse "conversion was
+    clean" with "this run is production ready".
+    """
+    marker = "## Readiness"
+    assert marker in text, "report has no Readiness section"
+    return text[text.index(marker) :]
+
+
 @pytest.fixture(scope="module")
 def full_inputs():
     """One real end-to-end run, built once.
@@ -163,7 +176,7 @@ def test_cpu_only_run_does_not_claim_rocm(full_inputs):
     text = report.render(inputs)
     assert "No AMD GPU was detected" in text
     assert "CPU-only" in text
-    assert "PRODUCTION READY" not in text
+    assert "PRODUCTION READY" not in readiness(text)
 
 
 def test_manual_port_verdict_is_carried_through(full_inputs):
@@ -237,7 +250,7 @@ def test_skipped_notes_become_blockers(full_inputs):
     inputs.skipped_notes = ["HIPIFY backend not wired up."]
     text = report.render(inputs)
     assert "HIPIFY backend not wired up." in text
-    assert "PRODUCTION READY" not in text
+    assert "PRODUCTION READY" not in readiness(text)
 
 
 def test_execution_failure_is_not_hidden_by_good_parity(full_inputs):
@@ -249,7 +262,7 @@ def test_execution_failure_is_not_hidden_by_good_parity(full_inputs):
     text = report.render(inputs)
     assert "Execution failed" in text
     assert "expected ':'" in text
-    assert "PRODUCTION READY" not in text
+    assert "PRODUCTION READY" not in readiness(text)
 
 
 def test_partial_case_failures_count_as_blockers(full_inputs):
