@@ -80,6 +80,15 @@ SUBPROCESS_TIMEOUT_S = 120
 BENCH_WARMUP_ITERS = 5
 BENCH_ITERS = 50
 
+# The web UI runs the whole pipeline in a disposable child process, because
+# the pipeline imports the file it is analysing. This bounds the child, not
+# the upload: a run that exceeds it is killed and reported as a timeout.
+UI_WORKER_TIMEOUT_S = float(os.environ.get("UI_WORKER_TIMEOUT_S", "900"))
+
+# Largest upload the UI will accept, in bytes. A migration source is a
+# source file, not an archive; anything larger is a mistake or an attack.
+UI_MAX_UPLOAD_BYTES = int(os.environ.get("UI_MAX_UPLOAD_BYTES", str(1024 * 1024)))
+
 # Verdict bands for benchmark comparison. Calibrated against measured
 # noise, not intuition: identical kernels vary by several percent run to
 # run on shared hardware. Values under BENCH_NOISE_BAND are reported as

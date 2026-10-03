@@ -154,3 +154,36 @@ def test_load_module_reports_a_syntax_error(tmp_path: Path):
     bad.write_text("def solve(x)\n  pass\n")
     with pytest.raises(SyntaxError):
         pipeline.load_module(bad)
+
+
+# --- example contract -----------------------------------------------------
+
+
+def test_example_exports_the_benchmark_contract():
+    """The example must keep exporting everything the benchmark harness needs.
+
+    Worth pinning because the failure is silent and looks like a feature:
+    `_benchmark` looks up `kernel`, `reference`, and `arg` with getattr and
+    skips the whole stage when any is missing, so deleting a module-level
+    `arg` turns "no GPU here" into "this module cannot be benchmarked" with
+    no error anywhere.
+    """
+    module = pipeline.load_module(EXAMPLE)
+    for name in ("OPERATION", "solve", "kernel", "reference", "arg"):
+        assert hasattr(module, name), f"example no longer exports {name}"
+    assert module.arg.shape[0] == 64
+
+
+def test_missing_arg_is_reported_as_a_skip(tmp_path: Path):
+    """A module without `arg` is skipped with a reason naming it."""
+    partial = tmp_path / "partial.py"
+    partial.write_text(
+        "import torch\n"
+        "OPERATION = 'softmax'\n"
+        "def solve(x): return x\n"
+        "def kernel(x): return x\n"
+        "def reference(x): return x\n"
+    )
+    result = pipeline.run(partial, run_parity=False, run_bench=True, with_narrative=False)
+    assert any("does not export arg" in note for note in result.skipped)
+    assert result.inputs.benchmarks == []

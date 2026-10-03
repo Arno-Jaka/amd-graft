@@ -32,6 +32,59 @@ Single file in. No repository ingestion.
 
 Containerization is not set up. Run against the interpreter directly.
 
+## Use
+
+    uv run graft doctor                        # what this machine can do
+    uv run graft migrate examples/01_torch_cuda_softmax.py
+    uv run graft serve                         # web UI on 127.0.0.1:8000
+
+`migrate` writes Markdown to stdout, or to a file with `-o`, and prints the
+same numbers the UI shows. `--json` emits the UI's summary instead, so the
+two front ends cannot disagree. `--no-parity`, `--no-bench`, and
+`--no-narrative` skip stages; each skip is recorded in the report rather
+than silently dropped.
+
+`doctor` exists so that "it didn't work" has a first question with a definite
+answer. On a machine without an AMD GPU it says so up front and explains
+which claims are therefore unavailable.
+
+## Web UI
+
+MonsterUI on FastHTML, one screen, no build step. Upload a `.py` or `.cu`
+file and the page shows what the pipeline actually measured: the conversion
+verdict together with its evidence, findings grouped by severity, execution,
+parity, benchmarks, and the optional narrative.
+
+The presentation rules are the same ones the report follows. A verdict never
+appears without the basis behind it, so a `.cu` file that was only read and
+never compiled reads as *"PRODUCTION READY (text analysis only)"* rather than
+as a completed verification. Anything unmeasured says `not measured` instead
+of rendering a zero or an empty panel. Motion is CSS-first and everything
+degrades under `prefers-reduced-motion`.
+
+The visual language is AMD-adjacent — near-black surfaces, one red accent,
+2px radii, their 326deg diagonal gradient. These are general stylistic
+tendencies. No AMD logo, wordmark, font file, or other brand asset is
+included or imitated.
+
+**Security.** The web endpoint accepts code, so it is built as if that
+mattered:
+
+- The server process never calls `pipeline.run()`. Uploads run in a
+  disposable child (`ui/worker.py`) which is killed on timeout.
+- Anything the analysed file prints is captured, clipped, and forwarded to
+  stderr, so it cannot corrupt the protocol stream or exhaust memory.
+- Uploads are size-limited and restricted to `.py` and `.cu`; filenames are
+  reduced to a basename inside a temporary directory.
+- `serve` binds to `127.0.0.1` by default and warns if asked to bind
+  elsewhere.
+
+The honest limit: the child shares the serving user's filesystem and network
+access. This is process containment, not a security sandbox, and the UI
+prints that admission in its own Execution panel rather than only in this
+README. A test asserts the isolation notes on the page are the runner's own,
+so the two cannot drift.
+
 ## Architecture
 
     input -> detector -> converter (hipify | ast) -> runner
@@ -87,8 +140,12 @@ Deterministic stages are done and tested on CPU:
 | Report | `report/report.py` | done |
 | Pipeline | `pipeline.py` | done, single entry point |
 | Explanation layer | `agent/` | done, optional, needs an LLM endpoint |
+| Web UI | `ui/app.py` | done, MonsterUI on FastHTML |
+| Upload containment | `ui/worker.py` | done, disposable child per upload |
+| CLI | `main.py` | done, `migrate` / `serve` / `doctor` |
 
-Not yet done: `ui/app.py` and `main.py`.
+Not yet done: nothing in the plan. Next is verification on real AMD
+hardware, which cannot be done from here.
 
 ROCm has not been executed. Everything above was verified on a CPU-only
 PyTorch build, so the AMD-specific claims are unproven until the code runs

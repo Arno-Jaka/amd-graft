@@ -15,3 +15,5 @@ wheels/
 # Conversion artifacts
 .out/
 *.hip
+# FastHTML session key, created on first run of the web UI
+.sesskey
