@@ -32,6 +32,60 @@ def sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def _time(fn, arg, device, iters: int) -> list[float]:
+    timings = []
+    for _ in range(iters):
+        start = time.perf_counter()
+        fn(arg)
+        sync(device)
+        timings.append((time.perf_counter() - start) * 1000.0)
+    return timings
+
+
+def settle(
+    fn,
+    arg: torch.Tensor,
+    device: torch.device,
+    batch: int = config.BENCH_SETTLE_BATCH,
+    window: int = config.BENCH_SETTLE_WINDOW,
+    tolerance: float = config.BENCH_SETTLE_TOLERANCE,
+    max_batches: int = config.BENCH_SETTLE_MAX_BATCHES,
+    budget_s: float = config.BENCH_SETTLE_BUDGET_S,
+) -> int:
+    """Warm the device until timing stops drifting. Returns batches used.
+
+    On an AMD Instinct MI300X VF the card runs roughly 12-14% slower for the
+    first couple of thousand consecutive kernel calls while boost clocks
+    ramp. Measuring across that ramp makes an unchanged kernel look like a
+    double-digit regression.
+
+    Convergence is tested over a sliding *window* of batch medians rather
+    than between consecutive pairs, because the ramp is gradual: each
+    individual batch looks stable next to the previous one while the
+    cumulative drift is large. A window only flattens once the ramp is
+    genuinely over, which on this device takes roughly 40 batches.
+
+    Two limits keep this affordable. `max_batches` caps the batch count and
+    `budget_s` caps wall-clock time, so a slow kernel cannot spend minutes
+    warming up. Hitting either limit means the device never settled, which
+    is noted rather than hidden: the remaining drift shows up as variance.
+    """
+    deadline = time.perf_counter() + budget_s
+    recent: list[float] = []
+    for index in range(1, max_batches + 1):
+        current = statistics.median(_time(fn, arg, device, batch))
+        recent.append(current)
+        if len(recent) > window:
+            recent.pop(0)
+        if len(recent) == window and recent[0] > 0:
+            spread = (max(recent) - min(recent)) / min(recent)
+            if spread <= tolerance:
+                return index
+        if time.perf_counter() >= deadline:
+            break
+    return index
+
+
 def time_kernel(
     fn,
     arg: torch.Tensor,
@@ -43,13 +97,13 @@ def time_kernel(
         fn(arg)
     sync(device)
 
-    timings = []
-    for _ in range(iters):
-        start = time.perf_counter()
-        fn(arg)
-        sync(device)
-        timings.append((time.perf_counter() - start) * 1000.0)
-    return timings
+    # Only for accelerators, and only when the kernel is long enough that
+    # a few hundred extra calls are affordable. CPU timing has no clock
+    # ramp, so it keeps its exact fixed-warmup behaviour.
+    if config.BENCH_SETTLE and device.type != "cpu" and iters:
+        settle(fn, arg, device)
+
+    return _time(fn, arg, device, iters)
 
 
 def _percentile(ordered: list[float], fraction: float) -> float:

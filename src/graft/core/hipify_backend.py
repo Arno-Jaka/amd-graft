@@ -26,9 +26,11 @@ Graft claims to handle. Both paths return the same result shape.
 
 from __future__ import annotations
 
+import difflib
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -138,39 +140,155 @@ def hipify_perl_path() -> str | None:
 def run_hipify_perl(source: str, path: Path | None = None) -> HipifyResult | None:
     """Delegate to hipify-perl. Returns None when it is unavailable.
 
-    Failure is not swallowed: a non-zero exit raises, because a partial
-    translation reported as complete is worse than no translation.
+    Three things this gets right that are easy to get wrong, all of them
+    found by running the real tool on a ROCm machine rather than by reading
+    its documentation:
+
+    1. hipify-perl takes a *file*, not stdin, and decides how to translate
+       from the extension. The source is staged in a temporary file that
+       keeps the original suffix, because a `.cu` staged as `.txt` is not
+       translated at all.
+    2. Translated source goes to stdout by *default*. `-o` names an output
+       file, so the intuitive `-o -` makes hipify-perl write to a file
+       literally called `-` and return empty stdout with exit status 0.
+       That failure is invisible unless the output is checked.
+    3. Empty output is an error, never a successful translation. An empty
+       "translation" would otherwise be reported as a completed port, with
+       the downstream stages declining to scan it.
+
+    Raises RuntimeError on a non-zero exit or on empty output: a partial or
+    absent translation reported as complete is worse than no translation.
     """
     executable = hipify_perl_path()
     if executable is None:
         return None
 
-    completed = subprocess.run(
-        [executable, "-o", "-", "--", str(path) if path else "-"],
-        input=source,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    suffix = path.suffix if path is not None and path.suffix else ".cu"
+    with tempfile.TemporaryDirectory(prefix="graft-hipify-") as tmp:
+        staged = Path(tmp) / f"input{suffix}"
+        staged.write_text(source, encoding="utf-8")
+        completed = subprocess.run(
+            [executable, str(staged)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
     if completed.returncode != 0:
         raise RuntimeError(
             f"hipify-perl failed ({completed.returncode}): "
             f"{completed.stderr.strip() or 'no stderr'}"
         )
 
+    translated = completed.stdout
+    if not translated.strip():
+        raise RuntimeError(
+            "hipify-perl exited successfully but produced no output. "
+            f"stderr: {completed.stderr.strip() or '(empty)'}. "
+            "Refusing to report an empty translation as a successful port."
+        )
+
     return HipifyResult(
-        source=completed.stdout,
-        changes=[
-            {
-                "symbol": "hipify-perl",
-                "line": 0,
-                "reason": "translated by the official ROCm hipify tool",
-            }
-        ],
+        source=translated,
+        changes=_diff_changes(source, translated),
         backend="hipify-perl",
-        notes=["translation produced by hipify-perl, not by Graft's table"],
+        notes=[
+            "translation produced by hipify-perl, not by Graft's table",
+            f"hipify-perl warnings: {completed.stderr.strip() or 'none'}",
+        ],
     )
+
+
+# Reported changes are capped so a large file cannot flood the report.
+MAX_REPORTED_CHANGES = 60
+
+
+def _identifier_positions(source: str) -> list[tuple[str, int]]:
+    """Every C/C++ identifier with its offset, for line attribution."""
+    return [
+        (match.group(0), match.start())
+        for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", source)
+    ]
+
+
+def _diff_changes(before: str, after: str) -> list[dict]:
+    """Describe what hipify-perl actually renamed.
+
+    hipify-perl reports no per-symbol detail, so the change list is recovered
+    by diffing identifiers. Reporting the tool's existence as a single opaque
+    change would hide the one thing a reviewer needs: which CUDA symbol
+    became which HIP symbol, and where.
+    """
+    old = _identifier_positions(before)
+    new = _identifier_positions(after)
+    old_names = [name for name, _ in old]
+    new_names = [name for name, _ in new]
+
+    matcher = difflib.SequenceMatcher(None, old_names, new_names, autojunk=False)
+    new_name_set = set(new_names)
+    old_name_set = set(old_names)
+
+    changes: list[dict] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        left = old[i1:i2]
+        right = new[j1:j2]
+
+        if len(left) == len(right):
+            # Even split: a straight rename, which is the common case.
+            for (name, offset), (replacement, _) in zip(left, right, strict=True):
+                if name != replacement:
+                    changes.append(
+                        {
+                            "symbol": name,
+                            "line": _line_of(before, offset),
+                            "reason": f"renamed to {replacement}",
+                        }
+                    )
+            continue
+
+        # Uneven split, usually a header rewrite. Pair what lines up and
+        # report the remainder as added or removed rather than inventing
+        # correspondence that the diff does not support.
+        for (name, offset), (replacement, _) in zip(left, right, strict=False):
+            if name != replacement:
+                changes.append(
+                    {
+                        "symbol": name,
+                        "line": _line_of(before, offset),
+                        "reason": f"renamed to {replacement}",
+                    }
+                )
+        for name, offset in left[len(right) :]:
+            if name not in new_name_set:
+                changes.append(
+                    {
+                        "symbol": name,
+                        "line": _line_of(before, offset),
+                        "reason": "removed by hipify-perl",
+                    }
+                )
+        for name, offset in right[len(left) :]:
+            if name not in old_name_set:
+                changes.append(
+                    {
+                        "symbol": name,
+                        "line": _line_of(before, offset),
+                        "reason": f"added by hipify-perl (was {name[len('hip'):]})"
+                        if name.startswith("hip")
+                        else "added by hipify-perl",
+                    }
+                )
+
+    if len(changes) > MAX_REPORTED_CHANGES:
+        hidden = len(changes) - MAX_REPORTED_CHANGES
+        changes = changes[:MAX_REPORTED_CHANGES]
+        changes.append(
+            {"symbol": "…", "line": 0, "reason": f"{hidden} further changes not listed"}
+        )
+    return changes
 
 
 def _line_of(source: str, index: int) -> int:

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from graft import config
 from graft.bench import bench
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,6 +89,138 @@ def test_timings_are_positive(tensor):
 
 def test_sync_is_a_noop_on_cpu():
     assert bench.sync(CPU) is None
+
+
+# --- clock settling --------------------------------------------------------
+#
+# Measured on an MI300X: boost clocks need ~1000 calls to ramp, and the card
+# runs ~7% slower until they do. These tests pin the mechanism that stops
+# that ramp leaking into a comparison as a phantom regression.
+
+
+def test_settle_stops_once_the_window_flattens(monkeypatch):
+    """Already-stable timing settles at the window size."""
+    seen = []
+
+    def fake_time(fn, arg, device, iters):
+        seen.append(iters)
+        return [1.0] * iters
+
+    monkeypatch.setattr(bench, "_time", fake_time)
+    used = bench.settle(_softmax, torch.randn(2, 2), CPU, batch=7, window=4)
+    assert used == 4
+    assert seen == [7, 7, 7, 7]
+
+
+def test_settle_does_not_stop_while_a_ramp_continues(monkeypatch):
+    """Consecutive batches agreeing is not enough during a gradual ramp.
+
+    Each batch here is within 1% of the one before it, yet the window keeps
+    sliding. A pairwise test would have exited early and benchmarked the
+    ramp; the window test has to keep going.
+    """
+    sequence = [
+        [10.0, 10.0],
+        [9.90, 9.90],
+        [9.80, 9.80],
+        [8.0, 8.0],
+        [7.0, 7.0],
+        [7.0, 7.0],
+        [7.0, 7.0],
+        [7.0, 7.0],
+    ]
+    calls = {"n": 0}
+
+    def fake_time(fn, arg, device, iters):
+        batch = sequence[min(calls["n"], len(sequence) - 1)]
+        calls["n"] += 1
+        return batch
+
+    monkeypatch.setattr(bench, "_time", fake_time)
+    used = bench.settle(_softmax, torch.randn(2, 2), CPU, batch=2, window=4)
+    assert used == 8
+
+
+def test_settle_respects_the_batch_cap(monkeypatch):
+    """A kernel that never stabilises must not warm up forever."""
+    calls = {"n": 0}
+
+    def fake_time(fn, arg, device, iters):
+        calls["n"] += 1
+        return [float(calls["n"])]
+
+    monkeypatch.setattr(bench, "_time", fake_time)
+    used = bench.settle(
+        _softmax, torch.randn(2, 2), CPU, batch=2, max_batches=5, budget_s=999
+    )
+    assert used == 5
+    assert calls["n"] == 5
+
+
+def test_settle_respects_the_time_budget(monkeypatch):
+    """A slow kernel stops warming up once the wall-clock budget is spent."""
+    ticks = iter([0.0, 0.0, 0.0, 5.0, 5.0, 5.0])
+    monkeypatch.setattr(bench.time, "perf_counter", lambda: next(ticks))
+    calls = {"n": 0}
+
+    def fake_time(fn, arg, device, iters):
+        calls["n"] += 1
+        return [1.0 - calls["n"] * 0.1]  # never settles on its own
+
+    monkeypatch.setattr(bench, "_time", fake_time)
+    used = bench.settle(
+        _softmax,
+        torch.randn(2, 2),
+        CPU,
+        batch=2,
+        window=4,
+        max_batches=100,
+        budget_s=2.0,
+    )
+    assert used < 100
+    assert calls["n"] == used
+
+
+def test_settle_is_skipped_on_cpu(tensor):
+    """CPU timing has no clock ramp, so call counts stay exact."""
+    if not config.BENCH_SETTLE:
+        pytest.skip("settling disabled")
+
+    calls = {"n": 0}
+
+    def counting(x):
+        calls["n"] += 1
+        return _softmax(x)
+
+    bench.time_kernel(counting, tensor, CPU, warmup=4, iters=6)
+    assert calls["n"] == 10
+
+
+def test_settle_runs_for_accelerators(monkeypatch, tensor):
+    """A non-CPU device does warm up beyond warmup + iters."""
+    if not config.BENCH_SETTLE:
+        pytest.skip("settling disabled")
+
+    fake_cuda = torch.device("cuda", 0)
+    monkeypatch.setattr(bench, "sync", lambda device: None)
+
+    calls = {"n": 0}
+
+    def counting(x):
+        calls["n"] += 1
+        return _softmax(x)
+
+    settled = {"batches": 0}
+
+    def fake_settle(fn, arg, device, **kwargs):
+        settled["batches"] += 1
+        fn(arg)
+        return 1
+
+    monkeypatch.setattr(bench, "settle", fake_settle)
+    bench.time_kernel(counting, tensor, fake_cuda, warmup=2, iters=3)
+    assert settled["batches"] == 1
+    assert calls["n"] == 6  # 2 warmup + 1 settle call + 3 measured
 
 
 def test_benchresult_reports_expected_fields(tensor):

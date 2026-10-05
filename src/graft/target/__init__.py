@@ -1,0 +1,31 @@
+"""Remote AMD targets: connect, detect, and run Graft on someone else's GPU.
+
+The UI collects connection details per request and hands them straight to a
+transport. Nothing in this package writes a credential to disk, a log, or a
+report; :meth:`~graft.target.spec.TargetSpec.redacted` is the only supported
+way to render a target for display.
+"""
+
+from __future__ import annotations
+
+from graft.target.detect import TargetFacts
+from graft.target.remote import RemoteRun, run_remote
+from graft.target.spec import TargetError, TargetSpec, parse_form
+from graft.target.transport import CommandResult, TransportError, clip, quote
+
+# graft.target.detect.detect is deliberately not re-exported here. A bare
+# `detect` would shadow the submodule of the same name, so
+# `from graft.target import detect` would silently yield the function.
+# Callers wanting detection use run_remote(..., probe_only=True).
+__all__ = [
+    "CommandResult",
+    "RemoteRun",
+    "TargetError",
+    "TargetFacts",
+    "TargetSpec",
+    "TransportError",
+    "clip",
+    "parse_form",
+    "quote",
+    "run_remote",
+]

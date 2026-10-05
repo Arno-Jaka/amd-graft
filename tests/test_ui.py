@@ -30,6 +30,7 @@ from starlette.datastructures import UploadFile
 
 from graft import config, pipeline
 from graft.core import runner
+from graft.target import TargetError
 from graft.ui import summary as summary_module
 from graft.ui import worker
 from graft.ui.app import ISOLATION_NOTES, app, render_result
@@ -467,3 +468,384 @@ def test_uploadfile_reads_from_file_attribute():
     # Starlette UploadFile whose bytes are on `.file`, not `.read()`.
     upload_file = UploadFile(filename="x.py", file=io.BytesIO(b"x = 1"))
     assert upload_file.file.read() == b"x = 1"
+
+
+# --- cloud target route ---------------------------------------------------
+#
+# These matter most for what they *don't* show: a credential submitted to the
+# form must not come back in the response, in any error path.
+
+
+# Captured from the MI300X host on 2026-10-04, including the CPU agent that
+# rocminfo lists beside the GPU. The probe reports one line per GPU agent.
+GOOD_PROBE = """
+<<<os>>>Ubuntu 24.04.4 LTS
+<<<arch>>>x86_64
+<<<rocm_path>>>/opt/rocm/core-10.0/bin/hipcc
+<<<rocm>>>10.0.0
+<<<agents>>>AMD Instinct MI300X VF|gfx942
+<<<kfd_gpus>>>1
+<<<vram>>>205822885888 B
+<<<tool_hipcc>>>/opt/rocm/core-10.0/bin/hipcc
+<<<tool_hipify-perl>>>/opt/rocm/core-10.0/bin/hipify-perl
+<<<python>>>/usr/bin/python3
+<<<torch>>>2.12.0+rocm10.0.0|AMD Instinct MI300X VF
+<<<device_report>>>Agent 1
+  Name:                    INTEL(R) XEON(R) PLATINUM 8568Y+
+  Marketing Name:          INTEL(R) XEON(R) PLATINUM 8568Y+
+  Vendor Name:             CPU
+  Device Type:             CPU
+Agent 2
+  Name:                    gfx942
+  Marketing Name:          AMD Instinct MI300X VF
+  Vendor Name:             AMD
+  Device Type:             GPU
+"""
+
+SECRET = "TOKEN-MUST-NOT-ECHO-8f3a2b"
+theme_marker = "--red"
+
+
+def post_target(client, **fields):
+    # The cloud path is the one that carries credentials, so the target route
+    # tests opt into it explicitly rather than relying on the default.
+    data = {
+        "target": "cloud",
+        "kind": "jupyter",
+        "jupyter_host": "gpu.example.com",
+        "jupyter_token": SECRET,
+    }
+    data.update(fields)
+    return client.post("/target", data=data)
+
+
+class FakeJupyter:
+    """Stands in for a transport so no network is touched."""
+
+    def __init__(self, spec, stdout="", returncode=0):
+        self.spec = spec
+        self.stdout = stdout
+        self.returncode = returncode
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc_info):
+        self.exited = True
+
+
+class TestTargetRoute:
+    def test_form_is_present_on_the_index(self, client):
+        html = client.get("/").text
+        assert 'name="target"' in html
+        assert "Local GPU" in html
+        assert "Cloud GPU" in html
+        assert "No target contacted yet" in html
+
+    def test_local_is_the_default_and_hides_the_credentials(self, client):
+        """A machine with a card in it must never be shown a key field."""
+        html = client.get("/").text
+        # Panels are rendered but hidden, so the secret is never echoed into a
+        # field value; the key prompt only appears when cloud is chosen.
+        assert 'id="panel-cloud"' in html
+        assert "Private key path" in html
+        assert SECRET not in html
+
+    @staticmethod
+    def _panel(markup, panel):
+        """The class attribute fastcore rendered for a panel, so a test can
+        assert on the initial state rather than on script behaviour."""
+        import re
+
+        tag = re.search(rf'<div[^>]*id="{panel}"[^>]*>', markup)
+        assert tag, f"{panel} missing from the response"
+        found = re.search(r'class="([^"]*)"', tag.group(0))
+        return found.group(1) if found else ""
+
+    def test_the_local_default_is_rendered_not_left_to_the_script(self, client):
+        """The credential panel must be hidden before any script runs.
+
+        Relying on JavaScript to add the hiding class means a blocked script
+        leaves a private-key prompt sitting on the page of somebody who asked
+        to use the GPU in the room they are sitting in.
+        """
+        markup = client.get("/").text
+        assert "hidden" in self._panel(markup, "panel-cloud")
+        assert "hidden" not in self._panel(markup, "panel-local")
+
+    def test_cloud_renders_the_chosen_transport_only(self, client):
+        markup = client.post("/target", data={"target": "cloud", "kind": "ssh"}).text
+        assert "hidden" not in self._panel(markup, "panel-cloud")
+        assert "hidden" not in self._panel(markup, "panel-ssh")
+        assert "hidden" in self._panel(markup, "panel-jupyter")
+        assert "<details" in markup
+        assert "Advanced connection settings" in markup
+
+    def test_cloud_jupyter_hides_the_ssh_key_field(self, client):
+        markup = client.post(
+            "/target", data={"target": "cloud", "kind": "jupyter", "host": "h", "token": "t"}
+        ).text
+        assert "hidden" not in self._panel(markup, "panel-jupyter")
+        assert "hidden" in self._panel(markup, "panel-ssh")
+
+    def test_the_location_picker_is_a_dropdown(self, client):
+        markup = client.get("/").text
+        assert '<select id="target"' in markup
+        assert 'value="local" selected="selected"' in markup
+        assert 'value="cloud"' in markup
+        # Radios are gone: two clicks and two rows of vertical space above the
+        # fields they control.
+        assert 'type="radio"' not in markup
+
+    def test_the_transport_picker_is_a_dropdown(self, client):
+        markup = client.post("/target", data={"target": "cloud", "kind": "jupyter"}).text
+        assert '<select id="kind"' in markup
+        assert 'value="jupyter" selected="selected"' in markup
+
+    def test_each_transport_names_its_own_fields(self, client):
+        """Two inputs called "host" would let the wrong one win silently."""
+        markup = client.post("/target", data={"target": "cloud", "kind": "ssh"}).text
+        assert 'name="ssh_host"' in markup
+        assert 'name="jupyter_host"' in markup
+        assert 'name="host"' not in markup
+
+    def test_the_chosen_transport_supplies_the_host(self, client, monkeypatch):
+        """A host typed for SSH must not reach a Jupyter server."""
+        from graft.ui import app as app_module
+
+        seen = []
+
+        def factory(spec):
+            seen.append(spec.host)
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(app_module, "build_transport", factory)
+        client.post(
+            "/target",
+            data={
+                "target": "cloud",
+                "kind": "jupyter",
+                "ssh_host": "ssh.example.com",
+                "ssh_username": "sshuser",
+                "ssh_key_path": "/keys/id_ed25519",
+                "jupyter_host": "jupyter.example.com",
+                "jupyter_username": "jupyteruser",
+                "jupyter_token": SECRET,
+            },
+        )
+        assert seen == ["jupyter.example.com"]
+
+    def test_a_local_submit_touches_no_transport(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        def boom(spec):
+            raise AssertionError("the local target must not open a transport")
+
+        monkeypatch.setattr(app_module, "build_transport", boom)
+        body = client.post("/target", data={"target": "local", "mode": "probe"}).text
+        assert "Checked this machine" in body
+
+    def test_local_reports_when_no_gpu_is_present(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        monkeypatch.setattr(
+            app_module,
+            "local_capability",
+            lambda: {"device": "cpu", "backend": "cpu", "gpu": False, "torch": "2.14.1"},
+        )
+        body = client.post("/target", data={"target": "local"}).text
+        assert "not detected" in body
+        assert "skipped rather than reported" in body
+
+    def test_local_warns_that_the_bands_are_uncalibrated(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        monkeypatch.setattr(
+            app_module,
+            "local_capability",
+            lambda: {
+                "device": "AMD Instinct MI300X VF",
+                "backend": "rocm",
+                "gpu": True,
+                "vram_mb": 196288,
+                "torch": "2.14.1+rocm7.2.0",
+                "bands_calibrated": False,
+            },
+        )
+        body = client.post("/target", data={"target": "local"}).text
+        assert "196288 MB" in body
+        assert "provisional" in body
+
+    def test_a_local_secret_typed_by_mistake_is_never_echoed(self, client):
+        """Even a credential submitted on the local path must not come back."""
+        body = client.post(
+            "/target",
+            data={"target": "local", "key_path": "/root/.ssh/id_rsa", "token": SECRET},
+        ).text
+        assert SECRET not in body
+        assert "/root/.ssh/id_rsa" not in body
+
+    def test_detection_renders_hardware_facts(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        class T(FakeJupyter):
+            def run(self, command, *, cwd=None, timeout_s=None):
+                from graft.target.transport import CommandResult
+
+                return CommandResult(command, 0, GOOD_PROBE, "")
+
+        monkeypatch.setattr(app_module, "build_transport", lambda spec: T(spec))
+        body = post_target(client).text
+        assert "MI300X" in body
+        assert "gfx942" in body
+        assert "196288 MB" in body
+        assert "hipify-perl" in body
+
+    def test_the_transport_is_closed_even_on_success(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        made = []
+
+        def factory(spec):
+            transport = FakeJupyter(spec)
+            made.append(transport)
+            return transport
+
+        monkeypatch.setattr(app_module, "build_transport", factory)
+        post_target(client)
+        assert made and all(t.entered and t.exited for t in made)
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"jupyter_host": ""},
+            {"jupyter_host": "root@evil.example.com"},
+            {"port": "70000"},
+            {"remote_dir": "../etc"},
+            {"command_timeout_s": "1"},
+        ],
+    )
+    def test_bad_input_re_renders_the_form_without_the_secret(self, client, fields):
+        body = post_target(client, **fields).text
+        assert "Could not continue" in body
+        assert SECRET not in body
+
+    def test_an_unreachable_target_does_not_leak_the_token(self, client, monkeypatch):
+        from graft.target.transport import TransportError
+        from graft.ui import app as app_module
+
+        def factory(spec):
+            raise TransportError("Could not reach gpu.example.com:80. Check the host and port.")
+
+        monkeypatch.setattr(app_module, "build_transport", factory)
+        body = post_target(client).text
+        assert "Could not continue" in body
+        assert SECRET not in body
+
+    def test_a_transport_failure_never_shows_a_traceback(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        def factory(spec):
+            raise RuntimeError("boom: /secret/path/on/disk")
+
+        monkeypatch.setattr(app_module, "build_transport", factory)
+        body = post_target(client).text
+        assert "Could not continue" in body
+        assert "Traceback" not in body
+        assert "/secret/path/on/disk" not in body
+
+    def test_ssh_choice_is_preselected_after_a_submit(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        class T(FakeJupyter):
+            def run(self, command, *, cwd=None, timeout_s=None):
+                from graft.target.transport import CommandResult
+
+                return CommandResult(command, 0, GOOD_PROBE, "")
+
+        monkeypatch.setattr(app_module, "build_transport", lambda spec: T(spec))
+        body = post_target(client, kind="ssh", token="").text
+        assert 'value="ssh"' in body
+
+    def test_the_form_survives_a_successful_detection(self, client, monkeypatch):
+        """A result the user can only read is a dead end; the form must stay."""
+        from graft.ui import app as app_module
+
+        class T(FakeJupyter):
+            def run(self, command, *, cwd=None, timeout_s=None):
+                from graft.target.transport import CommandResult
+
+                return CommandResult(command, 0, GOOD_PROBE, "")
+
+        monkeypatch.setattr(app_module, "build_transport", lambda spec: T(spec))
+        body = post_target(client).text
+        assert "MI300X" in body
+        assert 'id="target-form"' in body
+        assert 'action="/target"' in body
+
+    def test_a_successful_detection_does_not_echo_the_token(self, client, monkeypatch):
+        from graft.ui import app as app_module
+
+        class T(FakeJupyter):
+            def run(self, command, *, cwd=None, timeout_s=None):
+                from graft.target.transport import CommandResult
+
+                return CommandResult(command, 0, GOOD_PROBE, "")
+
+        monkeypatch.setattr(app_module, "build_transport", lambda spec: T(spec))
+        assert SECRET not in post_target(client).text
+
+    def test_the_wrong_credential_type_is_refused(self, client, monkeypatch):
+        """SSH needs a key: without one paramiko would borrow the local agent."""
+        from graft.target.spec import parse_form
+
+        with pytest.raises(TargetError):
+            parse_form({"kind": "ssh", "host": "gpu.example.com"})
+        # Jupyter may legitimately be unauthenticated, so a blank token is fine.
+        assert parse_form({"kind": "jupyter", "host": "gpu.example.com"}).kind == "jupyter"
+
+    def test_secret_field_is_a_password_input(self, client):
+        html = client.get("/").text
+        assert 'type="password"' in html
+
+
+class TestAmdTheme:
+    def test_red_accent_is_present(self, client):
+        assert "#ed1c24" in client.get("/").text.lower()
+
+    def test_panels_are_clipped_not_rounded(self, client):
+        html = client.get("/").text
+        assert "clip-path" in html
+        assert "polygon(" in html
+
+    def test_the_theme_loads_nothing_external(self):
+        """Our CSS and JS must be self-contained.
+
+        Note the scope: MonsterUI itself injects htmx/FastHTML/surreal from
+        cdn.jsdelivr.net, so the page as a whole is not offline-clean. This
+        test covers only the theme Graft owns, which is the part we can fix.
+        """
+        from graft.ui import theme
+
+        owned = f"{theme.STYLE}{theme.SCRIPT}".lower()
+        for needle in ("cdn.", "unpkg", "jsdelivr", "googleapis", "https://fonts", "http://", "https://"):
+            assert needle not in owned, needle
+
+    def test_our_theme_is_actually_in_the_page(self, client):
+        """Guards against the theme silently dropping out of the response."""
+        html = client.get("/").text
+        assert theme_marker in html
+
+    def test_reveal_has_an_end_state_so_content_is_never_stranded(self, client):
+        """If the script never runs, .reveal must not leave the page blank."""
+        html = client.get("/").text
+        assert "html.motion .reveal" in html
+        assert "@keyframes rise" in html
+        assert "to { opacity:1" in html.replace("  ", " ")
+
+    def test_reduced_motion_disables_everything(self, client):
+        html = client.get("/").text
+        assert "prefers-reduced-motion:reduce" in html.replace(" ", "")
