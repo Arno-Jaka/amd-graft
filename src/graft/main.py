@@ -1,11 +1,11 @@
 """Command-line entry point.
 
-Three subcommands, deliberately thin. All behaviour lives in `pipeline` for
-`migrate`, and in `ui.app` for `serve`; this module only parses arguments and
+Subcommands, deliberately thin. All behaviour lives in `pipeline` for
+`migrate` and in `tui.app` for `tui`; this module only parses arguments and
 decides what to print.
 
     graft migrate path/to/file.py     convert, verify, print the report
-    graft serve                       run the web UI on localhost
+    graft tui                         run the terminal UI
     graft doctor                      report what this machine can do
 
 `migrate` writes the Markdown report to stdout by default, or to a file with
@@ -60,10 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the optional agent layer",
     )
 
-    serve = sub.add_parser("serve", help="run the web UI")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8000)
-
+    sub.add_parser("tui", help="run the terminal UI")
     sub.add_parser("doctor", help="report what this machine can do")
     return parser
 
@@ -83,7 +80,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     )
 
     if args.json:
-        from graft.ui.summary import summarize
+        from graft.summary import summarize
 
         payload = summarize(result)
         payload.pop("report_text", None)
@@ -150,28 +147,33 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    from graft.ui.app import serve
+def cmd_tui(args: argparse.Namespace) -> int:
+    from graft.tui.app import run
 
-    if args.host not in {"127.0.0.1", "localhost", "::1"}:
-        print(
-            f"warning: binding {args.host}. The process that runs uploaded code "
-            "shares your user account, filesystem, and network.",
-            file=sys.stderr,
-        )
-    print(f"Graft on http://{args.host}:{args.port}")
-    serve(host=args.host, port=args.port)
+    run()
     return 0
+
+
+def cmd_serve() -> int:
+    """The web UI was removed; keep a clear pointer for anyone who typed it."""
+    print(
+        "The web UI has been removed. Run the terminal UI instead:\n  graft tui",
+        file=sys.stderr,
+    )
+    return 2
 
 
 COMMANDS = {
     "migrate": cmd_migrate,
-    "serve": cmd_serve,
+    "tui": cmd_tui,
     "doctor": cmd_doctor,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["serve"]:
+        return cmd_serve()
     args = build_parser().parse_args(argv)
     return COMMANDS[args.command](args)
 

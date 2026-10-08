@@ -36,10 +36,10 @@ Containerization is not set up. Run against the interpreter directly.
 
     uv run graft doctor                        # what this machine can do
     uv run graft migrate examples/01_torch_cuda_softmax.py
-    uv run graft serve                         # web UI on 127.0.0.1:8000
+    uv run graft tui                           # terminal UI
 
 `migrate` writes Markdown to stdout, or to a file with `-o`, and prints the
-same numbers the UI shows. `--json` emits the UI's summary instead, so the
+same numbers the TUI shows. `--json` emits the UI's summary instead, so the
 two front ends cannot disagree. `--no-parity`, `--no-bench`, and
 `--no-narrative` skip stages; each skip is recorded in the report rather
 than silently dropped.
@@ -48,47 +48,56 @@ than silently dropped.
 answer. On a machine without an AMD GPU it says so up front and explains
 which claims are therefore unavailable.
 
-## Web UI
+## Terminal UI
 
-MonsterUI on FastHTML, one screen, no build step. Upload a `.py` or `.cu`
-file and the page shows what the pipeline actually measured: the conversion
-verdict together with its evidence, findings grouped by severity, execution,
-parity, benchmarks, and the optional narrative.
+A Textual app, `graft tui`, one screen, no build step. Choose a `.py` or
+`.cu` file, or probe a GPU target, and the panes show what the pipeline
+actually measured: the conversion verdict together with its evidence,
+findings grouped by severity, execution, parity, benchmarks, and the
+optional narrative.
 
 The presentation rules are the same ones the report follows. A verdict never
 appears without the basis behind it, so a `.cu` file that was only read and
 never compiled reads as *"PRODUCTION READY (text analysis only)"* rather than
 as a completed verification. Anything unmeasured says `not measured` instead
-of rendering a zero or an empty panel. Motion is CSS-first and everything
-degrades under `prefers-reduced-motion`.
+of rendering a zero or an empty panel.
 
-The visual language is AMD-adjacent — near-black surfaces, one red accent,
-2px radii, their 326deg diagonal gradient. These are general stylistic
-tendencies. No AMD logo, wordmark, font file, or other brand asset is
-included or imitated.
+**Security.** The UI accepts code, so it is built as if that mattered:
 
-**Security.** The web endpoint accepts code, so it is built as if that
-mattered:
-
-- The server process never calls `pipeline.run()`. Uploads run in a
-  disposable child (`ui/worker.py`) which is killed on timeout.
+- The TUI process never calls `pipeline.run()`. A migration runs in a
+  disposable child (`worker.py`) which is killed on timeout.
 - Anything the analysed file prints is captured, clipped, and forwarded to
   stderr, so it cannot corrupt the protocol stream or exhaust memory.
-- Uploads are size-limited and restricted to `.py` and `.cu`; filenames are
-  reduced to a basename inside a temporary directory.
-- `serve` binds to `127.0.0.1` by default and warns if asked to bind
-  elsewhere.
+- Source files are restricted to `.py` and `.cu`; filenames are reduced to a
+  basename inside a temporary directory.
 
-The honest limit: the child shares the serving user's filesystem and network
-access. This is process containment, not a security sandbox, and the UI
-prints that admission in its own Execution panel rather than only in this
-README. A test asserts the isolation notes on the page are the runner's own,
-so the two cannot drift.
+The honest limit: the child shares the TUI user's filesystem and network
+access. This is process containment, not a security sandbox.
+
+## Remote GPU targets
+
+The UI can run the pipeline against a `local` interpreter, an `ssh` host, or a
+`jupyter` server. Jupyter is the fallback for the many cloud GPU providers
+that expose port 80 and block inbound SSH; commands run in a terminal session
+over the Jupyter websocket, and files move through the contents API.
+
+Jupyter support depends on two packages that nothing else uses, so they are an
+opt-in extra rather than a base requirement:
+
+    uv sync --extra jupyter        # or: pip install 'graft[jupyter]'
+
+Without them, choosing the Jupyter transport fails with a message naming the
+missing package and pointing at the SSH option; SSH and local runs are
+unaffected.
+
+Jupyter is implemented but has not been validated against a live server. It is
+the least-exercised path, so treat a first connection as a test of the
+transport as much as of the code.
 
 ## Architecture
 
     input -> detector -> converter (hipify | ast) -> runner
-          -> parity (reference vs port) -> bench -> report -> UI
+          -> parity (reference vs port) -> bench -> report -> summary -> TUI
 
 Every finding carries a severity: `blocker` (no mechanical translation
 exists, a human must rewrite it), `review` (a translation exists but the
@@ -140,12 +149,13 @@ Deterministic stages are done and tested on CPU:
 | Report | `report/report.py` | done |
 | Pipeline | `pipeline.py` | done, single entry point |
 | Explanation layer | `agent/` | done, optional, needs an LLM endpoint |
-| Web UI | `ui/app.py` | done, MonsterUI on FastHTML |
-| Upload containment | `ui/worker.py` | done, disposable child per upload |
-| CLI | `main.py` | done, `migrate` / `serve` / `doctor` |
+| Terminal UI | `tui/` | done, Textual |
+| Upload containment | `worker.py` | done, disposable child per migration |
+| CLI | `main.py` | done, `migrate` / `tui` / `doctor` |
+| Remote targets | `target/` | SSH done; Jupyter implemented, unvalidated live |
 
-Not yet done: nothing in the plan. Next is verification on real AMD
-hardware, which cannot be done from here.
+Not yet done: verification on real AMD hardware, which cannot be done from
+here.
 
 ROCm has not been executed. Everything above was verified on a CPU-only
 PyTorch build, so the AMD-specific claims are unproven until the code runs

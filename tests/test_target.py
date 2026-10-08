@@ -50,7 +50,14 @@ class FakeTransport:
 
 def test_empty_port_becomes_the_default_not_zero():
     """An omitted port must never survive as 0 and render as host:0."""
-    ssh = parse_form({"kind": "ssh", "host": "10.0.0.1", "username": "root", "key_path": "/tmp/id_ed25519"})
+    ssh = parse_form(
+        {
+            "kind": "ssh",
+            "host": "10.0.0.1",
+            "username": "root",
+            "key_path": "/tmp/id_ed25519",
+        }
+    )
     jupyter = parse_form({"kind": "jupyter", "host": "example.com", "token": "t"})
     assert ssh.port == 22
     assert jupyter.port == 80
@@ -85,16 +92,78 @@ def test_an_explicit_port_beats_a_default_port_in_the_url():
         ({"kind": "ftp", "host": "h"}, "unknown kind"),
         ({"kind": "ssh", "host": ""}, "missing host"),
         ({"kind": "ssh", "host": "root@evil"}, "credentials in host"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "port": "0x10"}, "non-numeric port"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "port": "70000"}, "port out of range"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "username": "a b"}, "space in username"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "remote_dir": "relative/path"}, "relative dir"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "remote_dir": "/a/../b"}, "traversal in dir"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "remote_dir": "/a/"}, "trailing slash"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "command_timeout_s": "1"}, "timeout floor"),
-        ({"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "key_passphrase": "line\nbreak"}, "newline in secret"),
+        (
+            {"kind": "ssh", "host": "h", "key_path": "/tmp/id_ed25519", "port": "0x10"},
+            "non-numeric port",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "port": "70000",
+            },
+            "port out of range",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "username": "a b",
+            },
+            "space in username",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "remote_dir": "relative/path",
+            },
+            "relative dir",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "remote_dir": "/a/../b",
+            },
+            "traversal in dir",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "remote_dir": "/a/",
+            },
+            "trailing slash",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "command_timeout_s": "1",
+            },
+            "timeout floor",
+        ),
+        (
+            {
+                "kind": "ssh",
+                "host": "h",
+                "key_path": "/tmp/id_ed25519",
+                "key_passphrase": "line\nbreak",
+            },
+            "newline in secret",
+        ),
         ({"kind": "jupyter", "host": "https://u:p@h"}, "credentials in URL"),
-        ({"kind": "jupyter", "host": "h", "token": "t", "remote_dir": "//x"}, "double slash"),
+        (
+            {"kind": "jupyter", "host": "h", "token": "t", "remote_dir": "//x"},
+            "double slash",
+        ),
     ],
 )
 def test_bad_input_is_rejected_with_a_readable_reason(fields, because):
@@ -149,13 +218,17 @@ def test_redacted_marks_that_something_was_present():
 
 
 def test_redacted_marks_an_absent_secret_as_empty():
-    spec = parse_form({"kind": "ssh", "host": "h", "username": "root", "key_path": "/tmp/id_ed25519"})
+    spec = parse_form(
+        {"kind": "ssh", "host": "h", "username": "root", "key_path": "/tmp/id_ed25519"}
+    )
     assert spec.redacted()["secret"] == ""
     assert spec.has_secret is False
 
 
 def test_key_path_is_not_echoed_back():
-    spec = parse_form({"kind": "ssh", "host": "h", "key_path": "/home/someone/.ssh/id_ed25519"})
+    spec = parse_form(
+        {"kind": "ssh", "host": "h", "key_path": "/home/someone/.ssh/id_ed25519"}
+    )
     assert spec.redacted()["key_path"] == REDACTED
 
 
@@ -264,6 +337,26 @@ def test_facts_serialise_without_leaking_a_bulk_transcript():
     assert len(facts.as_dict()["raw"]) <= detect_module.MAX_RAW_CHARS
 
 
+def test_probe_script_is_bounded_and_syntactically_valid():
+    """The probe must not walk the whole filesystem hunting for a Python.
+
+    An unbounded `find /` can run for minutes on a remote host, which presents
+    to the operator as a hung detection. Keep the search to bounded globs, and
+    keep the script parseable after the shell line-continuations.
+    """
+    assert "find /" not in detect_module.PROBE_SCRIPT
+    assert "containerd" not in detect_module.PROBE_SCRIPT
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    parsed = subprocess.run(
+        ["bash", "-n"],
+        input=detect_module.PROBE_SCRIPT,
+        text=True,
+        capture_output=True,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+
+
 # --- orchestration ---------------------------------------------------------
 
 
@@ -273,13 +366,20 @@ def _remote_replies(verify_ok: bool = True) -> FakeTransport:
         if verify_ok
         else "  elementwise scale by 2  max_abs_error=1.0  FAIL\nHIP VERIFICATION FAILED\n"
     )
-    body = remote_module.RESULT_MARKER + "\n" + json.dumps(
-        {
-            "steps": {
-                "verify_hip": {"returncode": 0 if verify_ok else 1, "output": verify},
-                "pipeline": {"returncode": 0, "output": "{}"},
+    body = (
+        remote_module.RESULT_MARKER
+        + "\n"
+        + json.dumps(
+            {
+                "steps": {
+                    "verify_hip": {
+                        "returncode": 0 if verify_ok else 1,
+                        "output": verify,
+                    },
+                    "pipeline": {"returncode": 0, "output": "{}"},
+                }
             }
-        }
+        )
     )
     return FakeTransport(
         {
@@ -290,7 +390,9 @@ def _remote_replies(verify_ok: bool = True) -> FakeTransport:
 
 
 def _spec() -> TargetSpec:
-    return parse_form({"kind": "jupyter", "host": "h", "token": "t", "remote_dir": "/root/graft"})
+    return parse_form(
+        {"kind": "jupyter", "host": "h", "token": "t", "remote_dir": "/root/graft"}
+    )
 
 
 def test_archive_excludes_vcs_and_build_noise(tmp_path):
@@ -305,7 +407,9 @@ def test_archive_excludes_vcs_and_build_noise(tmp_path):
     import io
     import tarfile
 
-    with tarfile.open(fileobj=io.BytesIO(remote_module.build_archive(tmp_path))) as archive:
+    with tarfile.open(
+        fileobj=io.BytesIO(remote_module.build_archive(tmp_path))
+    ) as archive:
         names = set(archive.getnames())
 
     assert "src/keep.py" in names
@@ -316,15 +420,21 @@ def test_archive_excludes_vcs_and_build_noise(tmp_path):
 
 def test_probe_only_does_not_upload_or_run_anything(source_tree):
     transport = _probe_transport(GOOD_PROBE)
-    run = remote_module.run_remote(transport, _spec(), source=source_tree, probe_only=True)
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, probe_only=True
+    )
     assert run.ok
     assert transport.pushed == []
-    assert not any(remote_module.RESULT_MARKER in command for command in transport.commands)
+    assert not any(
+        remote_module.RESULT_MARKER in command for command in transport.commands
+    )
 
 
 def test_a_probe_only_failure_reports_the_problems(source_tree):
     transport = _probe_transport("<<<os>>>Ubuntu\n<<<python>>>/usr/bin/python3\n")
-    run = remote_module.run_remote(transport, _spec(), source=source_tree, probe_only=True)
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, probe_only=True
+    )
     assert not run.ok
     assert "hipcc" in run.error
 
@@ -371,8 +481,10 @@ def test_a_missing_result_marker_is_handled(source_tree):
 
 
 def test_json_extraction_survives_surrounding_shell_noise():
-    noisy = "MOTD banner\nbash: warning: something\n" + remote_module.RESULT_MARKER + (
-        '\n{"steps": {"a": {"returncode": 0, "output": "has } brace"}}}\ntrailing'
+    noisy = (
+        "MOTD banner\nbash: warning: something\n"
+        + remote_module.RESULT_MARKER
+        + ('\n{"steps": {"a": {"returncode": 0, "output": "has } brace"}}}\ntrailing')
     )
     assert remote_module._extract_json(noisy) == {
         "steps": {"a": {"returncode": 0, "output": "has } brace"}}
@@ -409,13 +521,15 @@ def test_the_remote_script_emits_parsable_json(tmp_path):
     (project / "src" / "graft").mkdir(parents=True)
     (project / "src" / "graft" / "__init__.py").write_text("")
     (project / "tools").mkdir()
-    (project / "tools" / "verify_hip.py").write_text('print("HIP VERIFICATION PASSED")\n')
+    (project / "tools" / "verify_hip.py").write_text(
+        'print("HIP VERIFICATION PASSED")\n'
+    )
 
     script = tmp_path / "remote.sh"
     script.write_text(
-        remote_module.REMOTE_SCRIPT.replace(
-            "__REMOTE_DIR__", f'"{project}"'
-        ).replace("__MARKER__", remote_module.RESULT_MARKER)
+        remote_module.REMOTE_SCRIPT.replace("__REMOTE_DIR__", f'"{project}"').replace(
+            "__MARKER__", remote_module.RESULT_MARKER
+        )
     )
     completed = subprocess.run(
         ["sh", str(script)], capture_output=True, text=True, timeout=120, check=False
@@ -450,7 +564,9 @@ def test_the_archive_source_is_the_local_tree_not_the_remote_dir(tmp_path):
 def test_remote_never_prints_the_secret(tmp_path, capsys):
     """The whole remote path must be silent about the credential."""
     secret = "UNIQUE-SECRET-STRING"
-    spec = parse_form({"kind": "jupyter", "host": "h", "token": secret, "remote_dir": "/root/graft"})
+    spec = parse_form(
+        {"kind": "jupyter", "host": "h", "token": secret, "remote_dir": "/root/graft"}
+    )
     transport = _remote_replies()
     transport.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
     run = remote_module.run_remote(transport, spec, source=tmp_path)
@@ -532,6 +648,44 @@ class TestJupyterVersionGate:
         from graft.target.jupyter import supports_terminal_api
 
         assert supports_terminal_api(version) is supported
+
+
+class TestJupyterOptionalDeps:
+    """The Jupyter transport's dependencies are an opt-in extra.
+
+    SSH and local runs work without them, so their absence must produce a
+    clear, actionable message rather than an ImportError or a crash.
+    """
+
+    def test_a_missing_dep_names_itself_and_points_at_ssh(self, monkeypatch):
+        from graft.target import jupyter
+
+        monkeypatch.setattr(jupyter, "requests", None)
+        with pytest.raises(TransportError) as excinfo:
+            jupyter._require_deps()
+        message = str(excinfo.value)
+        assert "requests" in message
+        assert "pip install requests" in message
+        assert "SSH" in message
+
+    def test_both_missing_are_both_named(self, monkeypatch):
+        from graft.target import jupyter
+
+        monkeypatch.setattr(jupyter, "requests", None)
+        monkeypatch.setattr(jupyter, "websocket", None)
+        with pytest.raises(TransportError) as excinfo:
+            jupyter._require_deps()
+        message = str(excinfo.value)
+        assert "requests" in message and "websocket-client" in message
+        assert "them with" in message
+
+    def test_constructing_without_deps_fails_before_any_network(self, monkeypatch):
+        from graft.target import jupyter
+
+        monkeypatch.setattr(jupyter, "requests", None)
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        with pytest.raises(TransportError):
+            jupyter.JupyterTransport(spec)
 
 
 class _SilentSocket:
@@ -662,14 +816,17 @@ class TestUnpackDiagnosis:
     def _failed(self, stderr: str):
         from graft.target.transport import CommandResult
 
-        return CommandResult(command="tar xzf a.tar.gz", returncode=2, stdout="", stderr=stderr)
+        return CommandResult(
+            command="tar xzf a.tar.gz", returncode=2, stdout="", stderr=stderr
+        )
 
     def test_a_jupyter_path_mismatch_is_explained(self):
         from graft.target.remote import _unpack_hint
 
         spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
         message = _unpack_hint(
-            self._failed("tar: /root/g.tar.gz: Cannot open: No such file or directory"), spec
+            self._failed("tar: /root/g.tar.gz: Cannot open: No such file or directory"),
+            spec,
         )
         assert "root directory" in message
 
@@ -685,6 +842,8 @@ class TestUnpackDiagnosis:
         from graft.target.remote import _unpack_hint
 
         spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
-        message = _unpack_hint(self._failed("tar: graft/x: Cannot open: Permission denied"), spec)
+        message = _unpack_hint(
+            self._failed("tar: graft/x: Cannot open: Permission denied"), spec
+        )
         # Permission denied is not a path mismatch, so no misleading hint.
         assert "root directory" not in message

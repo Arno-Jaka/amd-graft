@@ -45,6 +45,7 @@ class PipelineResult:
     report_text: str
     inputs: report.ReportInputs
     skipped: list[str] = field(default_factory=list)
+    ai_review: dict | None = None
 
     @property
     def verdict(self):
@@ -158,6 +159,7 @@ def run(
     run_parity: bool = True,
     run_bench: bool = True,
     with_narrative: bool = True,
+    ai_review: dict | None = None,
 ) -> PipelineResult:
     """Convert, verify, benchmark, narrate, and render in one pass.
 
@@ -168,6 +170,10 @@ def run(
         run_bench: time the kernel. Requires a GPU; skipped otherwise.
         with_narrative: ask the agent layer for prose. Ignored when no
             endpoint is configured, which is the normal case.
+        ai_review: request one provider-specific review of the final output.
+            A dict with ``provider``, ``model``, and ``api_key``. Routed
+            through this composition root so no other layer imports the
+            optional agent package.
 
     Returns a PipelineResult. Does not raise on a failed conversion, a
     failed parity check, or a missing agent: those are outcomes the report
@@ -177,7 +183,8 @@ def run(
     inputs = report.ReportInputs()
     skipped: list[str] = []
 
-    inputs.migration = converter.convert(path.read_text(encoding="utf-8"), path)
+    original_source = path.read_text(encoding="utf-8")
+    inputs.migration = converter.convert(original_source, path)
     inputs.telemetry_snapshot = telemetry.device_snapshot()
     device = device or config.resolve_device()
 
@@ -209,7 +216,100 @@ def run(
         inputs.narratives = _narrative(inputs)
 
     inputs.skipped_notes = skipped
-    return PipelineResult(report.render(inputs), inputs, skipped)
+    report_text = report.render(inputs)
+    review = None
+    if ai_review is not None:
+        review = _ai_review(original_source, inputs, ai_review)
+        report_text = _render_ai_review(report_text, review)
+    return PipelineResult(report_text, inputs, skipped, ai_review=review)
+
+
+def _ai_review(
+    original_source: str, inputs: report.ReportInputs, options: dict
+) -> dict:
+    """Ask the optional agent layer for one provider-specific review.
+
+    The import is lazy and scoped here because ``pipeline`` is the only
+    module outside the agent package permitted to reach for it. A missing
+    or broken agent package must not stop a deterministic run from
+    completing, so failures are returned as an unavailable review.
+    """
+    try:
+        from graft.agent.review import review_conversion
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"The AI review layer is not available ({type(exc).__name__}).",
+        }
+
+    converted_source = inputs.migration.ported_source if inputs.migration else ""
+    return review_conversion(
+        original_source,
+        converted_source,
+        _review_evidence(inputs),
+        provider=str(options.get("provider") or ""),
+        model_id=str(options.get("model") or ""),
+        api_key=str(options.get("api_key") or ""),
+    )
+
+
+def _render_ai_review(report_text: str, review: dict) -> str:
+    try:
+        from graft.agent.review import render_report_section
+    except Exception:
+        return report_text
+    return render_report_section(report_text, review)
+
+
+def _review_evidence(inputs: report.ReportInputs) -> dict:
+    """Shape the measured results the same way the UI summary does.
+
+    The model receives a projection of the run, never raw dataclasses, so
+    it can only cite numbers that were actually measured.
+    """
+    migration = inputs.migration
+    if migration is None:
+        conversion: dict = {
+            "verdict": report.NOT_MEASURED,
+            "basis": report.NOT_MEASURED,
+            "route": "unknown",
+            "findings": [],
+        }
+    else:
+        conversion = {
+            "verdict": report._verdict_line(migration.coverage.verdict),
+            "basis": report._verdict_basis(migration, inputs.parity),
+            "route": migration.route.lang if migration.route else "unknown",
+            "findings": [
+                {
+                    "severity": str(finding.severity),
+                    "symbol": finding.symbol,
+                    "line": finding.line,
+                    "reason": finding.reason,
+                }
+                for finding in migration.coverage.findings
+            ],
+        }
+
+    execution = inputs.execution
+    execution_evidence = None
+    if execution is not None:
+        execution_evidence = {
+            "ok": bool(execution.ok),
+            "case_count": execution.case_count or 0,
+            "timed_out": bool(execution.timed_out),
+            "exit_code": execution.exit_code,
+            "error_type": execution.error_type,
+            "error_message": execution.error_message,
+        }
+
+    return {
+        "conversion": conversion,
+        "execution": execution_evidence,
+        "parity": inputs.parity,
+        "benchmarks": inputs.benchmarks,
+        "environment": inputs.telemetry_snapshot,
+    }
 
 
 def _narrative(inputs: report.ReportInputs) -> dict[str, str]:

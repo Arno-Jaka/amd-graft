@@ -135,9 +135,26 @@ def main() -> int:
     print("\n" + "=" * 72)
     print(f"hipcc --offload-arch={ARCH}")
     print("=" * 72)
+    # Prefer SDK hipcc if present
+    hipcc_cmd = "hipcc"
+    sdk = None
+    for path in sorted(REPO.glob("**/_rocm_sdk_core/bin/hipcc")):
+        hipcc_cmd = str(path)
+        sdk = path.parent.parent
+        break
+    cenv = dict(os.environ)
+    if sdk is not None:
+        sdk_root = sdk.parent
+        sdk_lib = str(sdk_root / "lib")
+        if sdk_lib and os.path.exists(sdk_lib):
+            cenv["LD_LIBRARY_PATH"] = os.pathsep.join([sdk_lib, cenv.get("LD_LIBRARY_PATH","")]).rstrip(os.pathsep)
+            cenv["LIBRARY_PATH"] = os.pathsep.join([sdk_lib, cenv.get("LIBRARY_PATH","")]).rstrip(os.pathsep)
+        cenv["HIP_PATH"] = str(sdk_root)
+        cenv["HIP_INCLUDE_DIRS"] = str(sdk_root / "include")
+        cenv["HIP_LIB_PATH"] = sdk_lib
     compile_run = subprocess.run(
         [
-            "hipcc",
+            hipcc_cmd,
             f"--offload-arch={ARCH}",
             "-O2",
             "-Wno-unused-result",
@@ -148,6 +165,7 @@ def main() -> int:
         capture_output=True,
         text=True,
         timeout=600,
+        env=cenv,
     )
     if compile_run.returncode != 0:
         print(compile_run.stdout[-2000:])

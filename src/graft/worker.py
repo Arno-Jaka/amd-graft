@@ -1,4 +1,4 @@
-"""Disposable child process that runs the pipeline for the web UI.
+"""Disposable child process that runs the pipeline for a UI.
 
 Threat model
 ------------
@@ -7,7 +7,7 @@ it. For a CLI that is fine: the user is running their own code. For an HTTP
 endpoint it is remote code execution, because `import` alone is enough and the
 whole module body runs at import time.
 
-So the server never calls `pipeline.run()`. It spawns this module, which:
+So neither UI calls `pipeline.run()` in-process. Both spawn this module, which:
 
 1. reads a JSON request from stdin: source text, filename, and options,
 2. writes the source into a throwaway directory,
@@ -32,10 +32,13 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import traceback
 from pathlib import Path
+
+from graft import config
 
 PROTOCOL_VERSION = 1
 
@@ -47,6 +50,46 @@ ALLOWED_SUFFIXES = {".py", ".cu"}
 # truncated. Some is kept because it is often the reason a run failed, but
 # it is bounded so a looping print cannot exhaust memory.
 CODE_STDOUT_LIMIT = 8192
+
+
+class WorkerFailure(Exception):
+    """The disposable worker could not be run or did not answer."""
+
+
+def run_worker(source: str, filename: str, options: dict) -> dict:
+    """Run source only in the disposable worker process.
+
+    This is the launcher half of the module: both the web UI and the TUI call
+    it, and it is the only place the child is spawned. The analyzed source
+    never imports into the caller's long-lived process.
+    """
+    request = json.dumps({"source": source, "filename": filename, "options": options})
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "graft.worker"],
+            input=request,
+            capture_output=True,
+            text=True,
+            timeout=config.UI_WORKER_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WorkerFailure(
+            f"The migration was killed after {config.UI_WORKER_TIMEOUT_S:.0f}s. It was probably looping."
+        ) from exc
+    if not completed.stdout.strip():
+        raise WorkerFailure(
+            f"The worker produced no output (exit {completed.returncode}). {(completed.stderr or '').strip()[-300:]}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise WorkerFailure("The worker returned something that was not JSON.") from exc
+    if not payload.get("ok"):
+        raise WorkerFailure(str(payload.get("error") or "the worker failed"))
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        raise WorkerFailure("The worker returned no summary.")
+    return summary
 
 
 def _respond(payload: dict) -> None:
@@ -81,9 +124,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parity = bool(options.get("run_parity", True))
     run_bench = bool(options.get("run_bench", True))
     with_narrative = bool(options.get("with_narrative", True))
+    review_options = options.get("ai_review")
+    if not isinstance(review_options, dict):
+        review_options = None
 
     from graft import pipeline
-    from graft.ui import summary as summary_module
+    from graft import summary as summary_module
 
     with tempfile.TemporaryDirectory(prefix="graft-worker-") as tmp:
         target = Path(tmp) / filename
@@ -97,13 +143,27 @@ def main(argv: list[str] | None = None) -> int:
         # noise is still visible for debugging.
         captured = io.StringIO()
         try:
-            with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            with (
+                contextlib.redirect_stdout(captured),
+                contextlib.redirect_stderr(captured),
+            ):
                 result = pipeline.run(
                     target,
                     run_parity=run_parity,
                     run_bench=run_bench,
-                    with_narrative=with_narrative,
+                    # The explicit provider choice owns this run's one model
+                    # call; avoid also invoking an unrelated environment model.
+                    with_narrative=with_narrative and review_options is None,
+                    # The review runs inside the pipeline so this worker never
+                    # imports the optional agent package directly.
+                    ai_review=review_options,
                 )
+                summary = summary_module.summarize(result)
+                migration = result.inputs.migration
+                summary["converted_source"] = (
+                    migration.ported_source if migration else ""
+                )
+                summary["ai_review"] = result.ai_review
         except Exception as exc:
             _fail(
                 f"{type(exc).__name__}: {exc}",
@@ -118,12 +178,12 @@ def main(argv: list[str] | None = None) -> int:
                     clipped += f"\n... {len(noise) - CODE_STDOUT_LIMIT} more characters"
                 print(clipped, file=sys.stderr)
 
-        # Flattened inside the child, while the dataclasses are still live.
-        # The parent only ever sees JSON.
+        # The parent only ever sees JSON-native measurements and source text;
+        # provider credentials are deliberately absent from this payload.
         payload = {
             "ok": True,
             "version": PROTOCOL_VERSION,
-            "summary": summary_module.summarize(result),
+            "summary": summary,
         }
 
     _respond(payload)

@@ -128,10 +128,23 @@ if [ -n "$vram" ]; then emit vram "$vram"; fi
 # in a virtualenv, and the system interpreter cannot see it. Asking one
 # interpreter reports "no PyTorch" on a host that has it.
 find_python() {
-  for candidate in $(command -v python3 2>/dev/null) \
-                   /opt/venv/bin/python3 \
-                   /opt/conda/bin/python3 \
-                   /usr/local/bin/python3; do
+  # The GPU image usually puts PyTorch in a virtualenv or conda env, and a
+  # non-login shell's PATH does not point at it. Check the interpreter on PATH
+  # and the common install layouts, then fall back to shallow globs of typical
+  # venv roots. Globs stay bounded; a whole-filesystem find can run for minutes
+  # on a remote host and returns interpreters the host itself cannot use.
+  for candidate in \
+      "$(command -v python3 2>/dev/null)" \
+      "$(command -v python 2>/dev/null)" \
+      /opt/venv/bin/python3 \
+      /opt/conda/bin/python3 \
+      /opt/conda3/bin/python3 \
+      /opt/*/bin/python3 \
+      /root/*/bin/python3 \
+      /home/*/*/bin/python3 \
+      /usr/local/bin/python3 \
+      /usr/bin/python3.[0-9]* \
+      /usr/bin/python3; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
       if "$candidate" -c 'import torch' >/dev/null 2>&1; then
         printf '%s' "$candidate"
@@ -174,6 +187,7 @@ class TargetFacts:
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     raw: str = ""
+    python_path: str = ""
 
     def summary_line(self) -> str:
         """One line for a heading or a log."""
@@ -393,4 +407,5 @@ def detect(transport) -> TargetFacts:
         problems=problems,
         notes=notes,
         raw=result.output,
+        python_path=fields.get("python", ""),
     )

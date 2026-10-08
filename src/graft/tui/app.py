@@ -1,0 +1,695 @@
+"""Textual terminal application for Graft."""
+
+from __future__ import annotations
+
+from typing import ClassVar
+
+from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
+from textual.widgets import Footer, Header, TabbedContent, TabPane
+
+from graft.tui.screens.loading import LoadingOverlay
+from graft.tui.screens.results import ResultsScreen
+from graft.tui.screens.target import TargetScreen
+
+
+class GraftTUI(App):
+    """Migration workspace for local files and remote AMD targets."""
+
+    TITLE = "Graft"
+    SUB_TITLE = "CUDA → ROCm migration workspace"
+    BINDINGS: ClassVar = [
+        ("ctrl+1", "show_workspace", "Workspace"),
+        ("ctrl+2", "show_results", "Results"),
+    ]
+
+    CSS = """
+    Screen {
+        background: #080d15;
+        color: #e5edf6;
+    }
+
+    LoadingOverlay {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #loading-card {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        padding: 1 3;
+        border: round #70ddc8;
+        background: #101a29;
+        align: center middle;
+    }
+
+    #loading-eyebrow {
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    #loading-spinner {
+        width: 100%;
+        height: 5;
+        margin-top: 1;
+        color: #70ddc8;
+    }
+
+    #loading-message {
+        width: 100%;
+        margin-top: 1;
+        color: #edf5fb;
+        text-style: bold;
+        text-align: center;
+    }
+
+    #loading-hint {
+        width: 100%;
+        margin-top: 1;
+        color: #9aabbd;
+        text-align: center;
+    }
+
+    Header {
+        background: #101a29;
+        color: #ecf8f6;
+    }
+
+    Footer {
+        background: #0d1420;
+        color: #92a3b7;
+    }
+
+    TabbedContent {
+        height: 1fr;
+        background: #080d15;
+    }
+
+    TabPane {
+        height: 1fr;
+        padding: 1 2;
+    }
+
+    #workspace-scroll {
+        height: 1fr;
+        scrollbar-color: #35526a;
+        scrollbar-background: #0b121d;
+    }
+
+    #target-screen {
+        height: 1fr;
+    }
+
+    #target-screen.compact,
+    #target-screen.short {
+        height: auto;
+    }
+
+    #workspace-grid {
+        height: 1fr;
+        grid-size: 2;
+        grid-columns: 1fr 1.08fr;
+        grid-rows: 1fr;
+        grid-gutter: 1 2;
+        padding-bottom: 1;
+    }
+
+    #workspace-grid.compact {
+        height: auto;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: auto;
+        grid-gutter: 1 0;
+    }
+
+    #workspace-grid.short {
+        height: auto;
+        grid-rows: auto;
+    }
+
+    .card {
+        height: 1fr;
+        min-height: 0;
+        padding: 1 2;
+        border: round #26384d;
+        background: #101a29;
+        scrollbar-color: #35526a;
+        scrollbar-background: #101a29;
+    }
+
+    #workspace-grid.compact .card,
+    #workspace-grid.short .card {
+        height: auto;
+        min-height: 12;
+    }
+
+    .eyebrow {
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    .hero-title {
+        margin-top: 1;
+        color: #f2f7fb;
+        text-style: bold;
+    }
+
+    .hero-copy {
+        margin-top: 1;
+        color: #a5b4c5;
+    }
+
+    .ascii-logo {
+        height: 7;
+        margin-bottom: 1;
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    .ascii-logo.compact {
+        height: 3;
+        color: #70ddc8;
+    }
+
+    .card-title {
+        margin-top: 1;
+        color: #edf5fb;
+        text-style: bold;
+    }
+
+    .field-label {
+        margin-top: 1;
+        color: #90a3b8;
+        text-style: bold;
+    }
+
+    .hint {
+        margin-top: 1;
+        color: #9aabbd;
+    }
+
+    #gpu-visual, #result-gpu-visual {
+        width: 1fr;
+        min-width: 0;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        border: round #26384d;
+        background: #0a111c;
+        color: #97a9bc;
+        text-style: bold;
+    }
+
+    #gpu-visual.active, #result-gpu-visual.active {
+        border: round #3b9c86;
+        background: #0b1919;
+        color: #70ddc8;
+    }
+
+    #gpu-visual.offline, #gpu-visual.disconnected,
+    #result-gpu-visual.offline, #result-gpu-visual.disconnected {
+        border: round #9b4853;
+        background: #1a1019;
+        color: #ff8992;
+    }
+
+    Input {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        border: round #344961;
+        background: #0a111c;
+        color: #e5edf6;
+    }
+
+    Select {
+        width: 1fr;
+        height: 3;
+        margin-top: 1;
+        color: #e5edf6;
+        background: transparent;
+    }
+
+    SelectCurrent {
+        width: 1fr;
+        height: 3;
+        padding: 0 1;
+        border: round #344961;
+        background: #0a111c;
+        color: #e5edf6;
+    }
+
+    SelectCurrent > Static#label {
+        width: 1fr;
+        color: #e5edf6;
+        background: transparent;
+        content-align: left middle;
+    }
+
+    SelectCurrent .arrow {
+        color: #70ddc8;
+        background: transparent;
+    }
+
+    Input:focus {
+        border: round #70ddc8;
+    }
+
+    Select:focus > SelectCurrent {
+        border: round #70ddc8;
+        background: #101a29;
+    }
+
+    Select:focus > SelectCurrent > Static#label {
+        color: #f2f7fb;
+    }
+
+    Grid.fields {
+        height: auto;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-gutter: 0 1;
+    }
+
+    Grid.fields.compact {
+        grid-size: 1;
+        grid-columns: 1fr;
+    }
+
+    #cloud-config,
+    #ssh-config,
+    #jupyter-config {
+        height: auto;
+    }
+
+    .field {
+        height: auto;
+    }
+
+    .button-row {
+        height: auto;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    .button-row.stacked {
+        layout: vertical;
+    }
+
+    Button {
+        min-width: 14;
+        width: 1fr;
+        margin: 0 1 0 0;
+        border: round #38526a;
+        background: #172638;
+        color: #dbe9f4;
+    }
+
+    Button.-primary {
+        border: round #70ddc8;
+        background: #70ddc8;
+        color: #07130f;
+        text-style: bold;
+    }
+
+    Button:hover {
+        background: #233a50;
+    }
+
+    Button.-primary:hover {
+        background: #93ebdb;
+    }
+
+    Collapsible {
+        margin-top: 1;
+        border-top: solid #28394b;
+        background: #0d1623;
+    }
+
+    CollapsibleTitle {
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    .status {
+        min-height: 3;
+        margin-top: 1;
+        padding: 0 1;
+        border-left: tall #70ddc8;
+        background: #0b1720;
+        color: #c9d9e5;
+        content-align: left middle;
+    }
+
+    .status.running {
+        border-left: tall #83bfff;
+        color: #c8e2ff;
+    }
+
+    .status.error {
+        border-left: tall #ff7d86;
+        color: #ffd0d3;
+    }
+
+    .status.success {
+        border-left: tall #4de0a1;
+        color: #a8f5cc;
+    }
+
+    .status.warning {
+        border-left: tall #f4bd55;
+        color: #ffe0a0;
+    }
+
+    .status.info {
+        border-left: tall #83bfff;
+        color: #c8e2ff;
+    }
+
+    #results-view {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    #result-heading, .result-heading {
+        margin: 0 0 1 0;
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    #result-heading.success, .result-heading.success { color: #4de0a1; }
+    #result-heading.warning, .result-heading.warning { color: #f4bd55; }
+    #result-heading.error, .result-heading.error { color: #ff7d86; }
+    #result-heading.info, .result-heading.info { color: #83bfff; }
+
+    #result-summary, .result-summary {
+        height: auto;
+        margin-bottom: 1;
+        padding: 1 2;
+        border: round #26384d;
+        background: #101a29;
+        color: #e5edf6;
+    }
+
+    #result-summary.success, .result-summary.success {
+        border: round #2e755d;
+        background: #0b1917;
+        color: #a8f5cc;
+    }
+
+    #result-summary.warning, .result-summary.warning {
+        border: round #87642b;
+        background: #1a160e;
+        color: #ffe0a0;
+    }
+
+    #result-summary.error, .result-summary.error {
+        border: round #87444d;
+        background: #1a1014;
+        color: #ffd0d3;
+    }
+
+    #result-summary.info, .result-summary.info {
+        border: round #355d7d;
+        background: #0e1721;
+        color: #c8e2ff;
+    }
+
+    #results-body {
+        height: auto;
+    }
+
+    .result-section {
+        height: auto;
+        margin-top: 1;
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    .result-kv {
+        height: auto;
+        color: #c9d9e5;
+    }
+
+    .finding-group {
+        height: auto;
+        margin-top: 1;
+        color: #ffb86b;
+        text-style: bold;
+    }
+
+    .finding {
+        height: auto;
+        color: #c9d9e5;
+    }
+
+    .source-pane {
+        height: auto;
+        max-height: 40;
+        margin-top: 1;
+        padding: 0 1;
+        border: round #293d54;
+        background: #0a111c;
+        color: #dbe9f4;
+        overflow-y: auto;
+    }
+
+    .editor-title {
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        background: #152438;
+        color: #9eb3c8;
+        text-style: bold;
+    }
+
+    .result-card {
+        height: auto;
+        margin-bottom: 1;
+        padding: 1 2;
+        border: round #26384d;
+        background: #101a29;
+    }
+
+    #source-editor-grid {
+        height: auto;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-gutter: 0 1;
+        margin-top: 1;
+    }
+
+    #source-editor-grid.stacked {
+        grid-size: 1;
+        grid-columns: 1fr;
+    }
+
+    .editor-pane {
+        height: auto;
+        min-width: 0;
+        border: round #293d54;
+        background: #0a111c;
+    }
+
+    .editor-title {
+        height: 3;
+        padding: 0 1;
+        background: #152438;
+        color: #9eb3c8;
+        text-style: bold;
+        content-align: left middle;
+    }
+
+    #original-source, #converted-source {
+        height: 22;
+        border: none;
+        background: #0a111c;
+    }
+
+    #save-row {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    #save-row.stacked {
+        height: auto;
+        layout: vertical;
+    }
+
+    #output-path {
+        width: 1fr;
+        margin-right: 1;
+    }
+
+    #save-output {
+        width: auto;
+        min-width: 24;
+    }
+
+    #save-row.stacked #output-path {
+        width: 1fr;
+        margin-right: 0;
+    }
+
+    #save-row.stacked #save-output {
+        width: 1fr;
+        margin-top: 1;
+    }
+
+    .inline-status {
+        height: auto;
+        margin-top: 1;
+        color: #9aabbd;
+    }
+
+    .inline-status.error {
+        color: #ff9ba1;
+    }
+
+    .inline-status.success { color: #79e5b0; }
+    .inline-status.warning { color: #f4c66d; }
+    .inline-status.info { color: #83bfff; }
+
+    #source-path-row {
+        height: 3;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    #source-path-row Input {
+        width: 1fr;
+        margin-right: 1;
+    }
+
+    #source-path-row Button {
+        width: auto;
+        min-width: 10;
+    }
+
+    #source-path-row.stacked {
+        height: auto;
+        layout: vertical;
+    }
+
+    #source-path-row.stacked Input,
+    #source-path-row.stacked Button {
+        width: 1fr;
+        margin-right: 0;
+    }
+
+    #comparison-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    #comparison-actions #comparison-status {
+        width: 1fr;
+        margin-top: 0;
+    }
+
+    #comparison-actions Button {
+        width: auto;
+        min-width: 22;
+    }
+
+    #comparison-actions.stacked {
+        height: auto;
+        layout: vertical;
+    }
+
+    #comparison-actions.stacked Button {
+        width: 1fr;
+        margin-top: 1;
+    }
+
+    #ai-review-view {
+        height: auto;
+        padding: 0 1;
+        background: #0d1623;
+        color: #d5e0ec;
+    }
+
+    #ai-review-view.success { color: #a8f5cc; }
+    #ai-review-view.warning { color: #ffe0a0; }
+    #ai-review-view.error { color: #ffd0d3; }
+    #ai-review-view.info { color: #c8e2ff; }
+
+    #report-view {
+        height: auto;
+        padding: 1 2;
+        border: round #26384d;
+        background: #0e1724;
+        color: #d5e0ec;
+    }
+
+    #report-view.success {
+        border: round #2e755d;
+        color: #d0f3df;
+    }
+
+    #report-view.warning {
+        border: round #87642b;
+        color: #f4e2bd;
+    }
+
+    #report-view.error {
+        border: round #87444d;
+        color: #f6d0d2;
+    }
+
+    #report-view.info {
+        border: round #355d7d;
+        color: #d2e8fa;
+    }
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._loading_overlay: LoadingOverlay | None = None
+        super().__init__(*args, **kwargs)
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with TabbedContent(initial="workspace", id="main-tabs"):
+            with (
+                TabPane("Workspace", id="workspace"),
+                VerticalScroll(id="workspace-scroll"),
+            ):
+                yield TargetScreen(id="target-screen")
+            with TabPane("Results", id="results"):
+                yield ResultsScreen(id="results-view")
+        yield Footer()
+
+    def action_show_workspace(self) -> None:
+        self.query_one(TabbedContent).active = "workspace"
+
+    def action_show_results(self) -> None:
+        self.query_one(TabbedContent).active = "results"
+
+    def show_loading(self, message: str) -> None:
+        """Push or refresh the blocking overlay for a long-running action."""
+        if self._loading_overlay is not None:
+            self._loading_overlay.set_message(message)
+            return
+        overlay = LoadingOverlay(message)
+        self._loading_overlay = overlay
+        self.push_screen(overlay)
+
+    def hide_loading(self) -> None:
+        """Dismiss the active operation overlay after its worker completes."""
+        overlay = self._loading_overlay
+        self._loading_overlay = None
+        if overlay is not None and self.screen is overlay:
+            self.pop_screen()
+
+
+def run() -> None:
+    """Run the terminal application."""
+    GraftTUI().run()
+
+
+if __name__ == "__main__":
+    run()

@@ -165,7 +165,9 @@ class TargetSpec:
             self, "command_timeout_s", _coerce_timeout(self.command_timeout_s)
         )
 
-        port_default = DEFAULT_SSH_PORT if self.kind == KIND_SSH else DEFAULT_JUPYTER_PORT
+        port_default = (
+            DEFAULT_SSH_PORT if self.kind == KIND_SSH else DEFAULT_JUPYTER_PORT
+        )
         port = _coerce_port(self.port, port_default)
         if self.kind == KIND_JUPYTER:
             host, explicit, scheme = _split_jupyter_url(self.host)

@@ -119,7 +119,9 @@ class JupyterTransport:
 
     def _check(self, response, what: str) -> None:
         if response.status_code in (401, 403):
-            raise TransportError(f"Jupyter refused the request while {what}. Check the token.")
+            raise TransportError(
+                f"Jupyter refused the request while {what}. Check the token."
+            )
         if response.status_code == 404:
             raise TransportError(
                 f"Jupyter has no endpoint for {what}. Confirm this is a "
@@ -129,7 +131,9 @@ class JupyterTransport:
                 "not resolve."
             )
         if not response.ok:
-            raise TransportError(f"Jupyter returned HTTP {response.status_code} while {what}.")
+            raise TransportError(
+                f"Jupyter returned HTTP {response.status_code} while {what}."
+            )
 
     def _request(self, method: str, path: str, *, what: str, timeout: float, **kwargs):
         try:
@@ -145,9 +149,13 @@ class JupyterTransport:
                 f"Could not reach {self.spec.safe_label()}. Check the host and port."
             ) from error
         except requests.exceptions.Timeout as error:
-            raise TransportError(f"Timed out reaching {self.spec.safe_label()} while {what}.") from error
+            raise TransportError(
+                f"Timed out reaching {self.spec.safe_label()} while {what}."
+            ) from error
         except requests.exceptions.RequestException as error:
-            raise TransportError(f"Jupyter request failed while {what}: {error}") from error
+            raise TransportError(
+                f"Jupyter request failed while {what}: {error}"
+            ) from error
         self._check(response, what)
         return response
 
@@ -171,7 +179,9 @@ class JupyterTransport:
     # -- lifecycle --------------------------------------------------------
 
     def probe(self) -> None:
-        status = self._request("GET", "/api/status", what="checking server status", timeout=20)
+        status = self._request(
+            "GET", "/api/status", what="checking server status", timeout=20
+        )
         version = "unknown"
         with contextlib.suppress(ValueError, AttributeError):
             version = (status.json().get("version") or "unknown").lower()
@@ -302,7 +312,9 @@ class JupyterTransport:
         try:
             name = response.json().get("name")
         except ValueError as error:
-            raise TransportError("Jupyter returned an unreadable terminal reply.") from error
+            raise TransportError(
+                "Jupyter returned an unreadable terminal reply."
+            ) from error
         if not name:
             raise TransportError("Jupyter did not return a terminal name.")
         return name
@@ -343,12 +355,17 @@ class JupyterTransport:
     def pull(self, remote_path: str) -> bytes:
         path = f"{self._contents_path(remote_path)}?content=1"
         response = self._request(
-            "GET", path, what=f"downloading {remote_path.rsplit('/', 1)[-1]}", timeout=300
+            "GET",
+            path,
+            what=f"downloading {remote_path.rsplit('/', 1)[-1]}",
+            timeout=300,
         )
         try:
             content = response.json().get("content", "")
         except ValueError as error:
-            raise TransportError("Jupyter returned an unreadable file reply.") from error
+            raise TransportError(
+                "Jupyter returned an unreadable file reply."
+            ) from error
         return base64.b64decode(content)
 
 

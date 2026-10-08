@@ -96,8 +96,7 @@ class SSHTransport:
             ) from error
         except paramiko.AuthenticationException as error:
             raise TransportError(
-                "Authentication failed. Check the username, key path, and "
-                "passphrase."
+                "Authentication failed. Check the username, key path, and passphrase."
             ) from error
         except paramiko.BadHostKeyException as error:
             raise TransportError(
@@ -158,8 +157,7 @@ class SSHTransport:
             ) from error
         except OSError as error:
             raise TransportError(
-                f"Command failed on {self.spec.safe_label()}: "
-                f"{error.strerror or error}"
+                f"Command failed on {self.spec.safe_label()}: {error.strerror or error}"
             ) from error
         return CommandResult(
             command=full,

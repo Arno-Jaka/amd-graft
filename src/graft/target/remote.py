@@ -18,6 +18,7 @@ import json
 import re
 import tarfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -173,10 +174,7 @@ def _script_failure_hint(result: Any) -> str:
         lead = "The verification script produced no result block."
     out = clip((result.stdout or "").strip(), 500)
     err = clip((result.stderr or "").strip(), 500)
-    return (
-        f"{lead} stdout: {out or '(empty)'} "
-        f"stderr: {err or '(empty)'}"
-    )
+    return f"{lead} stdout: {out or '(empty)'} stderr: {err or '(empty)'}"
 
 
 def _extract_json(stdout: str) -> dict[str, Any] | None:
@@ -252,7 +250,9 @@ def run_remote(
             error="" if facts.ok else "; ".join(facts.problems),
         )
 
-    archive = build_archive(source or Path(__file__).resolve().parent.parent.parent.parent)
+    archive = build_archive(
+        source or Path(__file__).resolve().parent.parent.parent.parent
+    )
     remote_archive = f"{spec.remote_dir.rsplit('/', 1)[0] or '/'}/{ARCHIVE_NAME}"
     transport.push(archive, remote_archive)
 
@@ -288,7 +288,12 @@ def run_remote(
             started_at=started,
             duration_s=time.monotonic() - started,
             pushed_bytes=len(archive),
-            steps={"remote_script": {"returncode": result.returncode, "output": result.summary()}},
+            steps={
+                "remote_script": {
+                    "returncode": result.returncode,
+                    "output": result.summary(),
+                }
+            },
             ok=False,
             error=_script_failure_hint(result),
         )
@@ -324,3 +329,149 @@ def run_remote(
         ok=verified and not problems,
         error="; ".join(problems),
     )
+
+
+def run_remote_file(
+    transport,
+    spec: TargetSpec,
+    filename: str,
+    source: str,
+) -> dict[str, Any]:
+    """Upload and execute one converted file on a detected AMD GPU.
+
+    Each run uses a unique subdirectory under the selected remote workspace;
+    existing files are never removed. CUDA C++ output is compiled with
+    ``hipcc`` and then executed. Python output is run with the target's
+    PyTorch interpreter after confirming that PyTorch can see the GPU.
+    """
+    started = time.monotonic()
+    label = spec.safe_label()
+    name = Path(filename).name
+    suffix = Path(name).suffix.lower()
+    if suffix not in {".py", ".cu"}:
+        raise ValueError("Only .py and .cu converted files can run on the target.")
+    if not source.strip():
+        raise ValueError("The converted file is empty; there is nothing to upload.")
+
+    facts = detect(transport)
+    common = {
+        "spec_label": label,
+        "facts": facts.as_dict(),
+        "filename": name,
+    }
+    if not facts.gpu_count:
+        return {
+            **common,
+            "ok": False,
+            "stage": "gpu_detection",
+            "error": "No AMD GPU is visible on the target. The converted file was not uploaded or run.",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    run_dir = f"{spec.remote_dir}/graft-runs/{uuid.uuid4().hex}"
+    mkdir = transport.run(
+        f"mkdir -p {quote(run_dir)}", timeout_s=spec.command_timeout_s
+    )
+    if not mkdir.ok:
+        return {
+            **common,
+            "ok": False,
+            "stage": "prepare",
+            "error": f"Could not prepare a run directory on the target. {mkdir.summary()}",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    remote_file = f"{run_dir}/{name}"
+    transport.push(source.encode("utf-8"), remote_file)
+    uploaded_bytes = len(source.encode("utf-8"))
+
+    if suffix == ".cu":
+        if not facts.tools.get("hipcc"):
+            return {
+                **common,
+                "ok": False,
+                "stage": "compile",
+                "uploaded_bytes": uploaded_bytes,
+                "remote_path": remote_file,
+                "error": "The file was uploaded, but hipcc is not available on this target.",
+                "duration_s": round(time.monotonic() - started, 2),
+            }
+        binary = f"{run_dir}/graft-converted"
+        compile_command = (
+            f"cd {quote(run_dir)} && {quote(facts.tools['hipcc'])} -O2 "
+            f"{quote(name)} -o {quote(binary)}"
+        )
+        compile_result = transport.run(
+            compile_command, timeout_s=spec.command_timeout_s
+        )
+        if not compile_result.ok:
+            return {
+                **common,
+                "ok": False,
+                "stage": "compile",
+                "uploaded_bytes": uploaded_bytes,
+                "remote_path": remote_file,
+                "compile_output": compile_result.output,
+                "error": f"hipcc could not compile the converted file (exit {compile_result.returncode}).",
+                "duration_s": round(time.monotonic() - started, 2),
+            }
+        run_result = transport.run(
+            f"cd {quote(run_dir)} && {quote(binary)}",
+            timeout_s=spec.command_timeout_s,
+        )
+        return {
+            **common,
+            "ok": run_result.ok,
+            "stage": "complete" if run_result.ok else "execute",
+            "uploaded_bytes": uploaded_bytes,
+            "remote_path": remote_file,
+            "compile_output": compile_result.output,
+            "execution_output": run_result.output,
+            "exit_code": run_result.returncode,
+            "error": ""
+            if run_result.ok
+            else f"The compiled HIP program exited {run_result.returncode}.",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    python_path = facts.python_path or "python3"
+    gpu_probe_code = (
+        "import torch,sys; "
+        "ok=torch.cuda.is_available(); "
+        "print('GPU=' + (torch.cuda.get_device_name(0) if ok else 'unavailable')); "
+        "sys.exit(0 if ok else 2)"
+    )
+    gpu_probe = transport.run(
+        f"{quote(python_path)} -c {quote(gpu_probe_code)}",
+        timeout_s=spec.command_timeout_s,
+    )
+    if not gpu_probe.ok:
+        return {
+            **common,
+            "ok": False,
+            "stage": "pytorch_gpu_check",
+            "uploaded_bytes": uploaded_bytes,
+            "remote_path": remote_file,
+            "gpu_probe": gpu_probe.output,
+            "error": "The target has a GPU, but its PyTorch interpreter cannot use it. The converted script was not run.",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    run_result = transport.run(
+        f"cd {quote(run_dir)} && {quote(python_path)} {quote(name)}",
+        timeout_s=spec.command_timeout_s,
+    )
+    return {
+        **common,
+        "ok": run_result.ok,
+        "stage": "complete" if run_result.ok else "execute",
+        "uploaded_bytes": uploaded_bytes,
+        "remote_path": remote_file,
+        "gpu_probe": gpu_probe.output,
+        "execution_output": run_result.output,
+        "exit_code": run_result.returncode,
+        "error": ""
+        if run_result.ok
+        else f"The converted Python script exited {run_result.returncode}.",
+        "duration_s": round(time.monotonic() - started, 2),
+    }

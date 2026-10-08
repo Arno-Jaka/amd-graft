@@ -276,7 +276,7 @@ def _diff_changes(before: str, after: str) -> list[dict]:
                     {
                         "symbol": name,
                         "line": _line_of(before, offset),
-                        "reason": f"added by hipify-perl (was {name[len('hip'):]})"
+                        "reason": f"added by hipify-perl (was {name[len('hip') :]})"
                         if name.startswith("hip")
                         else "added by hipify-perl",
                     }

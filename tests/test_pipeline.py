@@ -184,6 +184,8 @@ def test_missing_arg_is_reported_as_a_skip(tmp_path: Path):
         "def kernel(x): return x\n"
         "def reference(x): return x\n"
     )
-    result = pipeline.run(partial, run_parity=False, run_bench=True, with_narrative=False)
+    result = pipeline.run(
+        partial, run_parity=False, run_bench=True, with_narrative=False
+    )
     assert any("does not export arg" in note for note in result.skipped)
     assert result.inputs.benchmarks == []

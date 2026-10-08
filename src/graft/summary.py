@@ -28,7 +28,15 @@ from graft.report import report
 # Fields copied straight off the coverage Finding dataclass. Matched_text is
 # included because it is the literal source fragment a human needs to find
 # the construct, and symbol alone is often a guess.
-FINDING_FIELDS = ("severity", "category", "symbol", "line", "reason", "remediation", "matched_text")
+FINDING_FIELDS = (
+    "severity",
+    "category",
+    "symbol",
+    "line",
+    "reason",
+    "remediation",
+    "matched_text",
+)
 
 
 def _text(value: Any, fallback: str = report.NOT_MEASURED) -> str:
@@ -107,7 +115,11 @@ def _conversion(inputs) -> dict[str, Any]:
         "findings": [
             {
                 "severity": str(finding.severity),
-                **{field: getattr(finding, field, None) for field in FINDING_FIELDS if field != "severity"},
+                **{
+                    field: getattr(finding, field, None)
+                    for field in FINDING_FIELDS
+                    if field != "severity"
+                },
             }
             for finding in migration.coverage.findings
         ],

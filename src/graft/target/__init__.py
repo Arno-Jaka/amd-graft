@@ -9,7 +9,8 @@ way to render a target for display.
 from __future__ import annotations
 
 from graft.target.detect import TargetFacts
-from graft.target.remote import RemoteRun, run_remote
+from graft.target.local import local_capability
+from graft.target.remote import RemoteRun, run_remote, run_remote_file
 from graft.target.spec import TargetError, TargetSpec, parse_form
 from graft.target.transport import CommandResult, TransportError, clip, quote
 
@@ -25,7 +26,9 @@ __all__ = [
     "TargetSpec",
     "TransportError",
     "clip",
+    "local_capability",
     "parse_form",
     "quote",
     "run_remote",
+    "run_remote_file",
 ]
