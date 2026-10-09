@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Static
+from textual.widgets import Button, Select, Static
 
 from graft.target.dependencies import scan_dependencies
 from graft.target.detect import TargetFacts
@@ -493,10 +493,201 @@ def test_losing_the_live_stream_marks_the_target_disconnected():
         shown_after,
     ) = asyncio.run(main())
     assert shown_before is True
-    assert facts is None and fields is None
+    assert facts is None and fields is not None
     assert "CONNECTION LOST" in panel_text
     assert "connection lost" in status_text.lower()
     assert shown_after is False
+
+
+def _cloud(app: GraftTUI) -> None:
+    app.query_one("#location-select", Select).value = "cloud"
+
+
+def _ssh_fields(**overrides):
+    fields = {
+        "kind": "ssh",
+        "host": "gpu.example.com",
+        "username": "root",
+        "key_path": "/tmp/k",
+        "key_passphrase": "",
+        "port": "",
+        "remote_dir": "/root/graft",
+        "command_timeout_s": "900",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_a_lost_stream_offers_a_reconnect_without_forgetting_the_target():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = _target_facts()
+            screen._handle_metrics_loss("The live connection was closed.")
+            await pilot.pause()
+            return (
+                screen._connected_fields,
+                screen._connected_facts,
+                screen.query_one("#reconnect-remote", Button).display,
+                screen._reconnect_timer is not None,
+                screen._reconnect_attempts,
+            )
+
+    fields, facts, button, scheduled, attempts = asyncio.run(main())
+    assert fields is not None
+    assert facts is None
+    assert button is True
+    assert scheduled is True
+    assert attempts == 0
+
+
+def test_a_failed_reconnect_keeps_the_settings_and_schedules_the_next_try():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._reconnect_attempts = 1
+            screen._reconnect_done(
+                _ssh_fields(),
+                None,
+                "Could not reach gpu.example.com: Connection timed out",
+            )
+            await pilot.pause()
+            return (
+                screen._connected_fields,
+                screen._connected_facts,
+                screen.query_one("#reconnect-remote", Button).display,
+                screen._reconnect_timer is not None,
+                screen.query_one("#status", Static).render(),
+            )
+
+    fields, facts, button, scheduled, status_text = asyncio.run(main())
+    assert fields is not None
+    assert facts is None
+    assert button is True
+    assert scheduled is True
+    assert "retrying" in str(status_text).lower()
+
+
+def test_an_auth_reconnect_failure_stops_retrying():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._reconnect_attempts = 1
+            screen._reconnect_done(
+                _ssh_fields(),
+                None,
+                "Authentication failed. Check the username, key path, and passphrase.",
+            )
+            await pilot.pause()
+            return (
+                screen._reconnect_timer,
+                screen._reconnect_attempts,
+                str(screen.query_one("#status", Static).render()),
+            )
+
+    timer, attempts, status_text = asyncio.run(main())
+    assert timer is None
+    assert attempts == 0
+    assert "reconnect failed" in status_text.lower()
+
+
+def test_reconnect_gives_up_after_the_budget():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._reconnect_attempts = len(screen.RECONNECT_BACKOFF_S)
+            screen._schedule_reconnect("still unreachable")
+            await pilot.pause()
+            return (
+                screen._reconnect_timer,
+                str(screen.query_one("#status", Static).render()),
+            )
+
+    timer, status_text = asyncio.run(main())
+    assert timer is None
+    assert "gave up" in status_text.lower()
+
+
+def test_a_successful_reconnect_restores_the_target(monkeypatch):
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            monkeypatch.setattr(screen, "_start_metrics", lambda *a, **k: None)
+            screen._reconnect_attempts = 2
+            screen._reconnect_done(_ssh_fields(), _target_facts(), "")
+            await pilot.pause()
+            panel = screen._gpu_panel()
+            return (
+                screen._connected_facts,
+                screen._reconnect_attempts,
+                screen.query_one("#reconnect-remote", Button).display,
+                str(panel.render()),
+                str(screen.query_one("#status", Static).render()),
+            )
+
+    facts, attempts, button, panel_text, status_text = asyncio.run(main())
+    assert facts is not None
+    assert attempts == 0
+    assert button is False
+    assert "CONNECTED" in panel_text
+    assert "reconnected" in status_text.lower()
+
+
+def test_reconnect_is_skipped_while_another_operation_runs():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._operation_active = True
+            started = []
+            screen.run_worker = lambda *a, **k: started.append(k)
+            screen._reconnect_attempts = 0
+            screen._start_reconnect(manual=True)
+            return (
+                started,
+                screen._reconnect_attempts,
+                screen._reconnect_timer is not None,
+            )
+
+    started, attempts, scheduled = asyncio.run(main())
+    assert started == []
+    assert attempts == 0
+    assert scheduled is True
+
 
 
 

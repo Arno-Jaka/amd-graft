@@ -61,6 +61,11 @@ class TargetScreen(Vertical):
         "gemini": "gemini-3.8-flash",
         "groq": "openai/gpt-oss-120b",
     }
+    # Seconds to wait before each automatic reconnect attempt after a live
+    # connection drops. Three tries, spaced out: a brief network blip is ridden
+    # out, while a genuinely gone host is not hammered hard enough to trip
+    # fail2ban. A manual "Reconnect" is always available.
+    RECONNECT_BACKOFF_S: ClassVar[tuple[int, ...]] = (5, 20, 60)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -69,12 +74,19 @@ class TargetScreen(Vertical):
         self._preview_timer: Timer | None = None
         # The last successful remote connection, kept so the dependency scan
         # and the live metrics can re-open the same target without the user
-        # retyping (or re-pasting a token) the form.
+        # retyping (or re-pasting a token) the form. It survives a dropped
+        # connection so the reconnect flow can reuse it.
         self._connected_fields: dict[str, Any] | None = None
+        # Capabilities from the last *live* connection. None means the target
+        # is not currently reachable, which is what gates the reconnect button
+        # and hides the install button.
         self._connected_facts: dict[str, Any] | None = None
         self._pending_fields: dict[str, Any] | None = None
         self._metrics_stop: threading.Event | None = None
         self._metrics_thread: threading.Thread | None = None
+        self._reconnect_attempts = 0
+        self._reconnect_timer: Timer | None = None
+        self._operation_active = False
 
     _LOGO = r""" ________    ________     ________    ________   _________
  |\   ____\  |\   __  \   |\   __  \  |\  _____\ |\___   __\
@@ -144,6 +156,7 @@ class TargetScreen(Vertical):
                 with Horizontal(classes="button-row", id="remote-actions"):
                     yield Button("Detect target", id="probe-remote")
                     yield Button("Verify on GPU", variant="primary", id="verify-remote")
+                    yield Button("Reconnect", id="reconnect-remote", disabled=True)
                     yield Button("Disconnect GPU", id="disconnect-remote")
                     yield Button(
                         "Upload & run converted file",
@@ -301,15 +314,17 @@ class TargetScreen(Vertical):
 
     def on_mount(self) -> None:
         self._sync_target_controls()
-        # is_mounted is still False inside on_mount, so defer the style-only
+        # is_mounted is False inside on_mount, so defer the style-only
         # updates until after the first refresh.
         self.call_after_refresh(self._apply_layout)
         self.call_after_refresh(self._refresh_dependency_button)
+        self.call_after_refresh(self._refresh_reconnect_button)
         # The workspace opens on the local machine, so its readings are the
         # first thing the panel can show without any connection.
         self._start_metrics("local")
 
     def on_unmount(self) -> None:
+        self._stop_reconnect_timer()
         self._stop_metrics()
 
     def on_resize(self, event: events.Resize) -> None:
@@ -384,12 +399,17 @@ class TargetScreen(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
         if button_id == "disconnect-remote":
+            self._cancel_reconnect()
             self._gpu_status("set_disconnected", "TARGET DISCONNECTED")
             self._set_status("Remote GPU disconnected", tone="info")
             self._connected_fields = None
             self._connected_facts = None
             self._refresh_dependency_button()
+            self._refresh_reconnect_button()
             self._start_metrics("local")
+            return
+        if button_id == "reconnect-remote":
+            self._start_reconnect(manual=True)
             return
         if button_id == "run-local":
             self._start_local_migration()
@@ -732,6 +752,7 @@ class TargetScreen(Vertical):
         status.update(message)
         for name in ("running", "success", "warning", "error", "info"):
             status.set_class(name == "running", name)
+        self._operation_active = True
         self._toggle_buttons(True)
         self.query_one("#install-deps", Button).disabled = True
         self.app.show_loading(message)
@@ -742,6 +763,7 @@ class TargetScreen(Vertical):
             "#probe-local",
             "#probe-remote",
             "#verify-remote",
+            "#reconnect-remote",
             "#run-converted",
         ):
             self.query_one(selector, Button).disabled = disabled
@@ -757,8 +779,10 @@ class TargetScreen(Vertical):
         selected_tone = "error" if is_error else tone or "success"
         for name in ("running", "success", "warning", "error", "info"):
             status.set_class(name == selected_tone, name)
+        self._operation_active = False
         self._toggle_buttons(False)
         self._refresh_dependency_button()
+        self._refresh_reconnect_button()
         self.app.hide_loading()
 
     def _show_error(self, message: str) -> None:
@@ -847,8 +871,13 @@ class TargetScreen(Vertical):
                 "Remote request failed", message
             )
             self._pending_fields = None
+            # The target is not live, even if a previous connection worked, so
+            # the reconnect button becomes available.
+            self._connected_facts = None
+            self._refresh_reconnect_button()
             self._maybe_show_tips(message)
         else:
+            self._cancel_reconnect()
             self._connected_fields = self._pending_fields
             self._connected_facts = result.get("facts")
             self._pending_fields = None
@@ -876,6 +905,132 @@ class TargetScreen(Vertical):
             if self._connected_fields:
                 self._start_metrics("remote", self._connected_fields)
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
+
+    def _refresh_reconnect_button(self) -> None:
+        """Offer a reconnect only for a target that is known but not live."""
+        if not self.is_mounted:
+            return
+        button = self.query_one("#reconnect-remote", Button)
+        on_cloud = self.query_one("#location-select", Select).value == "cloud"
+        can_reconnect = (
+            on_cloud
+            and self._connected_fields is not None
+            and self._connected_facts is None
+        )
+        button.display = can_reconnect
+        button.disabled = not can_reconnect
+
+    def _stop_reconnect_timer(self) -> None:
+        if self._reconnect_timer is not None:
+            self._reconnect_timer.stop()
+            self._reconnect_timer = None
+
+    def _cancel_reconnect(self) -> None:
+        self._stop_reconnect_timer()
+        self._reconnect_attempts = 0
+
+    def _start_reconnect(self, *, manual: bool = False) -> None:
+        """Probe the remembered target again, now or on the retry timer."""
+        self._stop_reconnect_timer()
+        if not self.is_mounted:
+            return
+        if self._connected_fields is None or self._connected_facts is not None:
+            return
+        if manual:
+            self._reconnect_attempts = 0
+        if self._operation_active:
+            # Something the user started is running; try again shortly rather
+            # than cancelling their work or colliding with its status.
+            self._reconnect_timer = self.set_timer(5, self._start_reconnect)
+            return
+        self._reconnect_attempts += 1
+        fields = dict(self._connected_fields)
+        self._set_busy("Reconnecting to the target…")
+        self.run_worker(
+            partial(self._run_reconnect, fields),
+            name="reconnect",
+            group="graft-operation",
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _run_reconnect(self, fields: dict[str, Any]) -> None:
+        try:
+            spec = parse_form(fields)
+            if spec.kind == "ssh":
+                from graft.target.ssh import SSHTransport
+
+                transport = SSHTransport(spec)
+            else:
+                from graft.target.jupyter import JupyterTransport
+
+                transport = JupyterTransport(spec)
+            with transport:
+                facts = detect(transport).as_dict()
+            self.app.call_from_thread(self._reconnect_done, fields, facts, "")
+        except (TargetError, TransportError) as exc:
+            self.app.call_from_thread(self._reconnect_done, fields, None, str(exc))
+        except Exception:
+            self.app.call_from_thread(
+                self._reconnect_done,
+                fields,
+                None,
+                "Graft could not reach the target again. Check the connection "
+                "details and try again.",
+            )
+
+    def _reconnect_done(
+        self,
+        fields: dict[str, Any],
+        facts: dict[str, Any] | None,
+        error: str,
+    ) -> None:
+        if not self.is_mounted:
+            return
+        if self.query_one("#location-select", Select).value != "cloud":
+            # The user moved away from the target while the probe was in
+            # flight; drop the result rather than yanking them back.
+            self._cancel_reconnect()
+            return
+        if error or facts is None:
+            # A rejected key or an active ban will not fix itself, and retrying
+            # only makes a ban worse; stop and let the tips explain. Everything
+            # else (a dropped route, a rebooting host) gets the next attempt.
+            category = classify_connection_failure(error, str(fields.get("kind", "")))
+            if category in {"auth", "banned"}:
+                self._cancel_reconnect()
+                self._set_status(f"Reconnect failed · {error}", is_error=True)
+                self._maybe_show_tips(error)
+                return
+            self._schedule_reconnect(error)
+            return
+        self._reconnect_attempts = 0
+        self._connected_fields = dict(fields)
+        self._connected_facts = dict(facts)
+        self._gpu_status("set_target_facts", facts)
+        self._set_status("Reconnected · live target readings resumed", tone="success")
+        self._start_metrics("remote", self._connected_fields)
+
+    def _schedule_reconnect(self, reason: str) -> None:
+        """Arrange the next automatic attempt, or give up after the budget."""
+        if self._connected_fields is None:
+            return
+        attempted = self._reconnect_attempts
+        total = len(self.RECONNECT_BACKOFF_S)
+        if attempted >= total:
+            self._set_status(
+                f"Target unreachable · reconnect gave up · {reason}",
+                is_error=True,
+            )
+            return
+        delay = self.RECONNECT_BACKOFF_S[attempted]
+        self._set_status(
+            f"Connection lost · retrying in {delay}s "
+            f"(attempt {attempted + 1}/{total})",
+            tone="warning",
+        )
+        self._reconnect_timer = self.set_timer(delay, self._start_reconnect)
 
     def _refresh_dependency_button(self) -> None:
         """Show the install button only when a checked target is missing tools.
@@ -1012,6 +1167,10 @@ class TargetScreen(Vertical):
 
     def _on_location_changed(self, location: str) -> None:
         """Local readings are always available; remote ones need a connection."""
+        # Leaving or returning to the target invalidates a pending retry; the
+        # user can restart it with the Reconnect button.
+        self._stop_reconnect_timer()
+        self._refresh_reconnect_button()
         if location == "local":
             self._start_metrics("local")
         else:
@@ -1118,17 +1277,20 @@ class TargetScreen(Vertical):
 
         The streaming thread has already stopped (it only reports a loss after
         its stream ended), so this must not join it: the caller is that thread,
-        parked in ``call_from_thread``. Flip the panel and forget the target so
-        nothing keeps claiming a live connection.
+        parked in ``call_from_thread``. Flip the panel, keep the connection
+        details for the retry, and schedule the first reconnect.
         """
         if not self.is_mounted:
             return
         panel = self._gpu_panel()
         if panel is not None:
             panel.set_disconnected("TARGET CONNECTION LOST")
-        self._connected_fields = None
+        # Facts describe a live target, so they are now stale; the fields still
+        # say how to reach it, so the reconnect flow can reuse them.
         self._connected_facts = None
+        self._stop_reconnect_timer()
         self._set_status(f"Target connection lost · {message}", is_error=True)
+        self._schedule_reconnect(message)
 
     def _metrics_update(self, snapshot: MetricsSnapshot) -> None:
         if not self.is_mounted:
