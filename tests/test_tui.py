@@ -689,6 +689,99 @@ def test_reconnect_is_skipped_while_another_operation_runs():
     assert scheduled is True
 
 
+def test_manual_reconnect_resets_attempt_budget():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._reconnect_attempts = 3
+            screen._reconnect_timer = screen.set_timer(5, lambda: None)
+            started = []
+
+            def fake_worker(*a, **k):
+                started.append(k)
+
+            screen.run_worker = fake_worker
+            screen._start_reconnect(manual=True)
+            await pilot.pause()
+            return (
+                started,
+                screen._reconnect_attempts,
+                screen._reconnect_timer,
+            )
+
+    started, attempts, timer = asyncio.run(main())
+    assert started
+    assert attempts == 1  # incremented
+    assert timer is None
+
+
+def test_reconnect_button_visibility_rules():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            btn = screen.query_one("#reconnect-remote", Button)
+            # Local mode: never shown
+            app.query_one("#location-select", Select).value = "local"
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            screen._refresh_reconnect_button()
+            await pilot.pause()
+            local_shown = btn.display
+            # Cloud but connected (facts present)
+            app.query_one("#location-select", Select).value = "cloud"
+            screen._connected_facts = _target_facts()
+            screen._refresh_reconnect_button()
+            await pilot.pause()
+            cloud_connected = btn.display
+            # Cloud but known but lost (facts None)
+            screen._connected_facts = None
+            screen._refresh_reconnect_button()
+            await pilot.pause()
+            cloud_lost = btn.display
+            return local_shown, cloud_connected, cloud_lost
+
+    local_shown, cloud_connected, cloud_lost = asyncio.run(main())
+    assert local_shown is False
+    assert cloud_connected is False
+    assert cloud_lost is True
+
+
+def test_switching_location_while_reconnecting_cancels_the_probe(monkeypatch):
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            _cloud(app)
+            await pilot.pause()
+            screen._connected_fields = _ssh_fields()
+            screen._connected_facts = None
+            # Start reconnect so there is a state
+            screen._reconnect_attempts = 0
+            screen._operation_active = False
+            started = []
+            screen.run_worker = lambda *a, **k: started.append("yes")
+            screen._start_reconnect(manual=False)
+            await pilot.pause()
+            # Simulate in-flight result arriving after location changed
+            app.query_one("#location-select", Select).value = "local"
+            screen._reconnect_done(_ssh_fields(), _target_facts(), "")
+            await pilot.pause()
+            return screen._reconnect_attempts, screen._connected_facts
+
+    attempts, facts = asyncio.run(main())
+    assert attempts == 0
+    assert facts is None
+
+
 
 
 
