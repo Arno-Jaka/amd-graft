@@ -887,6 +887,24 @@ class TargetScreen(Vertical):
                 f"Remote {mode} complete · target {state}",
                 tone="success" if result.get("ok") else "warning",
             )
+            # Alert if there are any missing dependencies after connection
+            try:
+                if mode in ("probe", "verify") and self._connected_facts:
+                    facts_obj = TargetFacts(**self._connected_facts)
+                    missing = missing_dependencies(facts_obj)
+                    actionable = actionable_dependencies(facts_obj)
+                    if missing or actionable:
+                        self.app.query_one(
+                            "#results-view", ResultsScreen
+                        ).show_missing_dependencies(
+                            "Target dependencies",
+                            actionable or missing,
+                            "Some dependencies are missing on the target. "
+                            "You can install them with 'Install missing dependencies'.",
+                        )
+                        self.app.query_one("#main-tabs", TabbedContent).active = "results"
+            except Exception:
+                pass
             results = self.app.query_one("#results-view", ResultsScreen)
             if mode == "file":
                 blocked = []

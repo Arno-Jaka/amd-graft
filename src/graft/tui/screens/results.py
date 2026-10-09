@@ -165,7 +165,7 @@ class ResultsScreen(VerticalScroll):
         yield Static("Results", id="result-heading")
         yield Static("", id="result-summary")
         with Horizontal(id="result-tools"):
-            yield Button("Copy results", id="copy-results")
+            yield Button("📋", id="copy-results", classes="icon-button")
         with Horizontal(id="save-row"):
             yield Input(placeholder="Save converted file to…", id="output-path")
             yield Button("Save converted file", id="save-output")
@@ -186,12 +186,12 @@ class ResultsScreen(VerticalScroll):
             return
         self.app.copy_to_clipboard(text)
         button = self.query_one("#copy-results", Button)
-        button.label = "Copied to clipboard"
+        button.label = "Copied ✓"
         self.set_timer(1.5, self._reset_copy_label)
 
     def _reset_copy_label(self) -> None:
         if self.is_mounted:
-            self.query_one("#copy-results", Button).label = "Copy results"
+            self.query_one("#copy-results", Button).label = "📋"
 
     def _copyable_text(self) -> str:
         """The currently displayed results as one plain-text block."""
