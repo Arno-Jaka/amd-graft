@@ -164,6 +164,8 @@ class ResultsScreen(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Static("Results", id="result-heading")
         yield Static("", id="result-summary")
+        with Horizontal(id="result-tools"):
+            yield Button("Copy results", id="copy-results")
         with Horizontal(id="save-row"):
             yield Input(placeholder="Save converted file to…", id="output-path")
             yield Button("Save converted file", id="save-output")
@@ -175,6 +177,33 @@ class ResultsScreen(VerticalScroll):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-output":
             self._save_converted()
+        elif event.button.id == "copy-results":
+            self._copy_results()
+
+    def _copy_results(self) -> None:
+        text = self._copyable_text()
+        if not text.strip():
+            return
+        self.app.copy_to_clipboard(text)
+        button = self.query_one("#copy-results", Button)
+        button.label = "Copied to clipboard"
+        self.set_timer(1.5, self._reset_copy_label)
+
+    def _reset_copy_label(self) -> None:
+        if self.is_mounted:
+            self.query_one("#copy-results", Button).label = "Copy results"
+
+    def _copyable_text(self) -> str:
+        """The currently displayed results as one plain-text block."""
+        chunks: list[str] = []
+        for widget in self.query(Static):
+            try:
+                text = str(widget.render())
+            except Exception:
+                continue
+            if text.strip():
+                chunks.append(text)
+        return "\n".join(chunks)
 
     def _save_converted(self) -> None:
         target = self.query_one("#output-path", Input).value.strip()
@@ -223,11 +252,13 @@ class ResultsScreen(VerticalScroll):
     def _reset(self) -> None:
         self._converted_source = ""
         self.query_one("#save-row").display = False
+        self.query_one("#result-tools").display = False
         self.query_one("#output-path", Input).value = ""
         self._body().remove_children()
 
-    def _mount_body(self, *widgets: Any) -> None:
+    def _mount_body(self, *widgets: Any, copyable: bool = True) -> None:
         self._body().mount(*widgets)
+        self.query_one("#result-tools").display = copyable
 
     # ------------------------------------------------------------------
     # public views
@@ -243,7 +274,8 @@ class ResultsScreen(VerticalScroll):
                 "target. Results appear here.",
                 markup=False,
                 classes="result-card",
-            )
+            ),
+            copyable=False,
         )
 
     def show_source_preview(
@@ -531,6 +563,23 @@ class ResultsScreen(VerticalScroll):
         self._reset()
         self._set_heading(title, "error")
         self._mount_body(Static(message, markup=False, classes="result-card error"))
+
+    def show_missing_dependencies(
+        self, action: str, missing: list[Any], message: str
+    ) -> None:
+        """A red block naming the target tool that stopped an operation."""
+        self._reset()
+        self._set_heading("Missing dependencies", "error")
+        lines = [message, ""]
+        for dep in missing:
+            detail = getattr(dep, "detail", "") or "not found"
+            lines.append(f"{getattr(dep, 'label', 'dependency')}: {detail}")
+            command = getattr(dep, "command", "")
+            if command:
+                lines.append(f"  install: {command}")
+        self._mount_body(
+            Static("\n".join(lines), markup=False, classes="result-card error")
+        )
 
     def show_migration_error(
         self, title: str, message: str, original_source: str

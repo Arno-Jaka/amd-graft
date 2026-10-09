@@ -535,6 +535,22 @@ class GraftTUI(App):
         background: #101a29;
     }
 
+    .result-card.error {
+        border: round #87444d;
+        background: #1a1019;
+        color: #ff9ba1;
+    }
+
+    #result-tools {
+        height: 3;
+        margin-top: 1;
+    }
+
+    #copy-results {
+        width: auto;
+        min-width: 20;
+    }
+
     #source-editor-grid {
         height: auto;
         grid-size: 2;

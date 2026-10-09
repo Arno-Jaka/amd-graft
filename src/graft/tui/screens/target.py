@@ -29,6 +29,7 @@ from graft.target import (
     TransportError,
     actionable_dependencies,
     install_dependencies,
+    missing_dependencies,
     parse_form,
     run_remote,
     run_remote_file,
@@ -300,7 +301,10 @@ class TargetScreen(Vertical):
 
     def on_mount(self) -> None:
         self._sync_target_controls()
+        # is_mounted is still False inside on_mount, so defer the style-only
+        # updates until after the first refresh.
         self.call_after_refresh(self._apply_layout)
+        self.call_after_refresh(self._refresh_dependency_button)
         # The workspace opens on the local machine, so its readings are the
         # first thing the panel can show without any connection.
         self._start_metrics("local")
@@ -594,6 +598,11 @@ class TargetScreen(Vertical):
             self.app.call_from_thread(self._local_probe_done, {}, str(exc))
 
     def _start_remote(self, mode: str) -> None:
+        if mode == "verify":
+            blocking = self._blocking_dependencies(None)
+            if blocking:
+                self._show_dependency_block("Remote verification", blocking)
+                return
         fields = self._remote_fields()
         self._pending_fields = dict(fields)
         message = (
@@ -639,6 +648,11 @@ class TargetScreen(Vertical):
             self._show_error(
                 "Run a migration first so there is a converted file to upload."
             )
+            return
+        suffix = Path(self._converted_filename).suffix.lower()
+        blocking = self._blocking_dependencies(suffix)
+        if blocking:
+            self._show_dependency_block("Running the converted file", blocking)
             return
         fields = self._remote_fields()
         filename = self._converted_filename
@@ -719,6 +733,7 @@ class TargetScreen(Vertical):
         for name in ("running", "success", "warning", "error", "info"):
             status.set_class(name == "running", name)
         self._toggle_buttons(True)
+        self.query_one("#install-deps", Button).disabled = True
         self.app.show_loading(message)
 
     def _toggle_buttons(self, disabled: bool) -> None:
@@ -743,6 +758,7 @@ class TargetScreen(Vertical):
         for name in ("running", "success", "warning", "error", "info"):
             status.set_class(name == selected_tone, name)
         self._toggle_buttons(False)
+        self._refresh_dependency_button()
         self.app.hide_loading()
 
     def _show_error(self, message: str) -> None:
@@ -844,7 +860,16 @@ class TargetScreen(Vertical):
             )
             results = self.app.query_one("#results-view", ResultsScreen)
             if mode == "file":
-                results.show_remote_file(result)
+                blocked = []
+                if result.get("stage") == "pytorch_gpu_check":
+                    suffix = Path(result.get("filename", "")).suffix.lower()
+                    blocked = self._blocking_dependencies(suffix)
+                if blocked:
+                    self._show_dependency_block(
+                        "Running the converted file", blocked
+                    )
+                else:
+                    results.show_remote_file(result)
             else:
                 results.show_remote(result, mode)
             self._refresh_dependency_button()
@@ -853,19 +878,58 @@ class TargetScreen(Vertical):
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
     def _refresh_dependency_button(self) -> None:
-        """Enable the install button only when a target is connected and lacks tools."""
+        """Show the install button only when a checked target is missing tools.
+
+        Gating on the facts means the button cannot appear before a target has
+        been inspected, and it stays hidden when there is nothing to install.
+        """
         if not self.is_mounted:
             return
         button = self.query_one("#install-deps", Button)
+        actionable: list[Any] = []
+        if self._connected_facts:
+            try:
+                actionable = actionable_dependencies(
+                    TargetFacts(**self._connected_facts)
+                )
+            except TypeError:
+                actionable = []
+        button.disabled = not actionable
+        button.display = bool(actionable)
+
+    def _blocking_dependencies(self, suffix: str | None) -> list[Any]:
+        """Tools absent on the connected target that would fail this operation.
+
+        ``suffix`` is the file being run, or ``None`` for the HIP verification.
+        A converted Python file runs under the target's PyTorch, so there the
+        optional ``torch`` becomes blocking rather than merely installable.
+        """
         if not self._connected_facts:
-            button.disabled = True
-            return
+            return []
         try:
             facts = TargetFacts(**self._connected_facts)
         except TypeError:
-            button.disabled = True
-            return
-        button.disabled = not actionable_dependencies(facts)
+            return []
+        blocking = missing_dependencies(facts)
+        if suffix is None or suffix == ".cu":
+            return blocking
+        return blocking + [
+            dep for dep in actionable_dependencies(facts) if dep.key == "torch"
+        ]
+
+    def _show_dependency_block(self, action: str, missing: list[Any]) -> None:
+        """Stop an operation and say, in red, which target tool is missing."""
+        names = ", ".join(getattr(dep, "label", dep.key) for dep in missing)
+        message = (
+            f"{action} needs {names} on the target, but it is not installed. "
+            "Install it with “Install missing dependencies”, or install it on "
+            "the target directly, then try again."
+        )
+        self._set_status(f"Blocked · {names} missing on the target", is_error=True)
+        self.app.query_one("#results-view", ResultsScreen).show_missing_dependencies(
+            action, missing, message
+        )
+        self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
     def _start_dependency_install(self) -> None:
         if not self._connected_fields or not self._connected_facts:

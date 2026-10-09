@@ -71,9 +71,13 @@ be read shows `not measured`, never a zero that reads as idle.
 When a target connects, Graft lists the tools the pipeline needs and marks
 what is missing. For the pieces it can install it offers the exact command, and
 installs nothing until that button is pressed, because the installs are
-system-wide and can be large. A connection that fails authentication — or that
-a host's fail2ban has banned — opens a short help panel with the unban command
-instead of a bare error.
+system-wide and can be large. The install button appears only when a checked
+target is actually missing something. Starting a run without installing first
+stops with the missing tool named in red on the results screen, instead of
+letting a cryptic remote error through. Any results shown can be copied to the
+clipboard with a single button. A connection that fails authentication — or
+that a host's fail2ban has banned — opens a short help panel with the unban
+command instead of a bare error.
 
 **Security.** The UI accepts code, so it is built as if that mattered:
 

@@ -446,6 +446,20 @@ def run_remote_file(
         timeout_s=spec.command_timeout_s,
     )
     if not gpu_probe.ok:
+        # A missing PyTorch and a PyTorch that cannot see the GPU are different
+        # problems with different fixes, but the interpreter reports both as a
+        # failed probe. Say which one it is.
+        if "no module named 'torch'" in gpu_probe.output.lower():
+            error = (
+                "The target has no PyTorch installed, so the converted file "
+                "cannot run there. PyTorch (ROCm) is listed as missing in the "
+                "dependency scan; install it, then try again."
+            )
+        else:
+            error = (
+                "The target has a GPU, but its PyTorch interpreter cannot use "
+                "it. The converted script was not run."
+            )
         return {
             **common,
             "ok": False,
@@ -453,7 +467,7 @@ def run_remote_file(
             "uploaded_bytes": uploaded_bytes,
             "remote_path": remote_file,
             "gpu_probe": gpu_probe.output,
-            "error": "The target has a GPU, but its PyTorch interpreter cannot use it. The converted script was not run.",
+            "error": error,
             "duration_s": round(time.monotonic() - started, 2),
         }
 

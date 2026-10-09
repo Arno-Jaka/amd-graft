@@ -395,6 +395,42 @@ def _spec() -> TargetSpec:
     )
 
 
+def test_a_python_run_without_torch_names_pytorch():
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            "import torch": CommandResult(
+                "probe-torch",
+                1,
+                "",
+                "ModuleNotFoundError: No module named 'torch'",
+            ),
+        }
+    )
+    result = remote_module.run_remote_file(
+        transport, _spec(), "converted.py", "import torch\n"
+    )
+    assert result["ok"] is False
+    assert result["stage"] == "pytorch_gpu_check"
+    assert "PyTorch" in result["error"]
+    assert "dependency scan" in result["error"]
+
+
+def test_a_python_run_with_gpu_less_torch_keeps_the_generic_error():
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            "import torch": CommandResult("probe-torch", 2, "GPU=unavailable", ""),
+        }
+    )
+    result = remote_module.run_remote_file(
+        transport, _spec(), "converted.py", "import torch\n"
+    )
+    assert result["ok"] is False
+    assert result["stage"] == "pytorch_gpu_check"
+    assert "cannot use it" in result["error"]
+
+
 def test_archive_excludes_vcs_and_build_noise(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "keep.py").write_text("x = 1")

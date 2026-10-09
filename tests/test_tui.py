@@ -12,10 +12,14 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
+from graft.target.dependencies import scan_dependencies
+from graft.target.detect import TargetFacts
 from graft.target.metrics import MetricsSnapshot
+from graft.tui.app import GraftTUI
 from graft.tui.screens.results import ResultsScreen
+from graft.tui.screens.target import TargetScreen
 from graft.tui.screens.tips import TipsScreen, classify_connection_failure, tips_for
 from graft.tui.widgets import GPUMetrics
 
@@ -242,4 +246,216 @@ def test_results_render_a_dependency_checklist():
     assert "Dependency check" in text
     assert "PyTorch (ROCm): installed" in text
     assert "hipcc (ROCm compiler): needs attention" in text
+
+
+# --- copyable results -------------------------------------------------------
+
+
+def test_copy_results_puts_the_displayed_text_on_the_clipboard():
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_dependency_install(
+                [
+                    {
+                        "key": "torch",
+                        "label": "PyTorch (ROCm)",
+                        "ok": True,
+                        "output": "",
+                        "error": "",
+                    }
+                ],
+                {"ok": True, "python_path": "/usr/bin/python3"},
+            )
+            await pilot.pause()
+            await pilot.click("#copy-results")
+            await pilot.pause()
+            return app._clipboard
+
+    text = asyncio.run(main())
+    assert text
+    assert "PyTorch (ROCm): installed" in text
+
+
+def test_copy_results_button_is_hidden_until_there_are_results():
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            empty = app.query_one("#result-tools").display
+            screen = app.query_one(ResultsScreen)
+            screen.show_dependency_install([], {"ok": True})
+            await pilot.pause()
+            return empty, app.query_one("#result-tools").display
+
+    empty, after = asyncio.run(main())
+    assert empty is False
+    assert after is True
+
+
+def test_results_render_a_red_missing_dependency_error():
+    dep = next(
+        item
+        for item in scan_dependencies(TargetFacts(ok=True, python_path="/usr/bin/python3"))
+        if item.key == "torch"
+    )
+
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_missing_dependencies(
+                "Running the converted file",
+                [dep],
+                "Running the converted file needs PyTorch (ROCm) on the target.",
+            )
+            await pilot.pause()
+            heading = screen.query_one("#result-heading", Static)
+            card = screen.query_one(".result-card", Static)
+            return (
+                str(heading.render()),
+                "error" in heading.classes,
+                "error" in card.classes,
+                str(card.render()),
+            )
+
+    heading, heading_red, card_red, body = asyncio.run(main())
+    assert heading == "Missing dependencies"
+    assert heading_red and card_red
+    assert "PyTorch (ROCm)" in body
+    assert "install:" in body
+
+
+# --- target gating and pre-flight checks ------------------------------------
+
+
+def _target_facts(**overrides):
+    base: dict = {
+        "ok": True,
+        "os_name": "Ubuntu 24.04.5 LTS",
+        "rocm_version": "6.2.0",
+        "gfx_arch": "gfx942",
+        "gpu_count": 1,
+        "gpu_name": "AMD Instinct MI300X",
+        "tools": {
+            "hipcc": "/opt/rocm/bin/hipcc",
+            "hipify-perl": "/opt/rocm/bin/hipify-perl",
+        },
+        "python_path": "/usr/bin/python3",
+    }
+    base.update(overrides)
+    return TargetFacts(**base).as_dict()
+
+
+def test_install_button_only_shows_for_a_checked_and_lacking_target():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            button = screen.query_one("#install-deps", Button)
+            before = (button.display, button.disabled)
+
+            screen._connected_facts = _target_facts(torch_version="")
+            screen._refresh_dependency_button()
+            await pilot.pause()
+            missing = (button.display, button.disabled)
+
+            screen._connected_facts = _target_facts(torch_version="2.4.0+rocm6.2")
+            screen._refresh_dependency_button()
+            await pilot.pause()
+            complete = (button.display, button.disabled)
+            return before, missing, complete
+
+    before, missing, complete = asyncio.run(main())
+    assert before == (False, True)
+    assert missing == (True, False)
+    assert complete == (False, True)
+
+
+def test_a_python_run_is_blocked_and_names_pytorch():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._connected_facts = _target_facts(torch_version="")
+            blocking = screen._blocking_dependencies(".py")
+            screen._show_dependency_block("Running the converted file", blocking)
+            await pilot.pause()
+            blob = "\n".join(
+                str(widget.render())
+                for widget in app.query_one("#results-view", ResultsScreen).query(Static)
+            )
+            return [dep.key for dep in blocking], app.query_one("#main-tabs").active, blob
+
+    keys, active, blob = asyncio.run(main())
+    assert keys == ["torch"]
+    assert active == "results"
+    assert "PyTorch" in blob
+    assert "Install missing dependencies" in blob
+
+
+def test_a_cu_run_and_verification_are_not_blocked_by_missing_torch():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._connected_facts = _target_facts(torch_version="")
+            return (
+                screen._blocking_dependencies(".cu"),
+                screen._blocking_dependencies(None),
+            )
+
+    cu, verify = asyncio.run(main())
+    assert cu == []
+    assert verify == []
+
+
+def test_a_finished_operation_reroutes_to_results():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            app.query_one("#main-tabs").active = "workspace"
+            screen._local_probe_done({"gpu": False, "device": "CPU-only"}, "")
+            await pilot.pause()
+            return app.query_one("#main-tabs").active
+
+    assert asyncio.run(main()) == "results"
+
+
+def test_a_python_run_that_failed_on_missing_torch_shows_the_red_block():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._remote_done(
+                {
+                    "ok": False,
+                    "stage": "pytorch_gpu_check",
+                    "filename": "converted.py",
+                    "facts": _target_facts(torch_version=""),
+                    "error": "The target has no PyTorch installed.",
+                },
+                "file",
+                "",
+            )
+            await pilot.pause()
+            results = app.query_one("#results-view", ResultsScreen)
+            return (
+                app.query_one("#main-tabs").active,
+                "\n".join(str(widget.render()) for widget in results.query(Static)),
+            )
+
+    active, blob = asyncio.run(main())
+    assert active == "results"
+    assert "Missing dependencies" in blob
+    assert "PyTorch" in blob
+
+
 
