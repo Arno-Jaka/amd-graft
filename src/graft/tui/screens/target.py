@@ -1095,17 +1095,40 @@ class TargetScreen(Vertical):
             with transport:
                 transport.stream(stream_command(1.0), on_line, stop=stop)
         except (TargetError, TransportError) as exc:
-            self._post_metrics(MetricsSnapshot(source="remote", error=str(exc)))
-        except Exception:
-            self._post_metrics(
-                MetricsSnapshot(source="remote", error="Live readings unavailable")
+            self._report_metrics_loss(str(exc))
+        except Exception as exc:
+            self._report_metrics_loss(
+                str(exc).strip() or "Live readings unavailable"
             )
+
+    def _report_metrics_loss(self, message: str) -> None:
+        """Post the failed reading, then drop the target state."""
+        self._post_metrics(MetricsSnapshot(source="remote", error=message))
+        with contextlib.suppress(Exception):
+            self.app.call_from_thread(self._handle_metrics_loss, message)
 
     def _post_metrics(self, snapshot: MetricsSnapshot) -> None:
         # The screen may be gone while a stream is still winding down; a
         # dropped reading is not worth surfacing.
         with contextlib.suppress(Exception):
             self.app.call_from_thread(self._metrics_update, snapshot)
+
+    def _handle_metrics_loss(self, message: str) -> None:
+        """A live reading failed: the "connected" state is no longer true.
+
+        The streaming thread has already stopped (it only reports a loss after
+        its stream ended), so this must not join it: the caller is that thread,
+        parked in ``call_from_thread``. Flip the panel and forget the target so
+        nothing keeps claiming a live connection.
+        """
+        if not self.is_mounted:
+            return
+        panel = self._gpu_panel()
+        if panel is not None:
+            panel.set_disconnected("TARGET CONNECTION LOST")
+        self._connected_fields = None
+        self._connected_facts = None
+        self._set_status(f"Target connection lost · {message}", is_error=True)
 
     def _metrics_update(self, snapshot: MetricsSnapshot) -> None:
         if not self.is_mounted:

@@ -458,4 +458,46 @@ def test_a_python_run_that_failed_on_missing_torch_shows_the_red_block():
     assert "PyTorch" in blob
 
 
+def test_losing_the_live_stream_marks_the_target_disconnected():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._connected_facts = _target_facts(torch_version="")
+            screen._connected_fields = {"kind": "ssh", "host": "h"}
+            screen._refresh_dependency_button()
+            await pilot.pause()
+            shown_before = screen.query_one("#install-deps", Button).display
+            screen._handle_metrics_loss(
+                "The live connection to h was closed by the target."
+            )
+            await pilot.pause()
+            panel = screen._gpu_panel()
+            status = screen.query_one("#status", Static)
+            return (
+                shown_before,
+                screen._connected_facts,
+                screen._connected_fields,
+                str(panel.render()),
+                str(status.render()),
+                screen.query_one("#install-deps", Button).display,
+            )
+
+    (
+        shown_before,
+        facts,
+        fields,
+        panel_text,
+        status_text,
+        shown_after,
+    ) = asyncio.run(main())
+    assert shown_before is True
+    assert facts is None and fields is None
+    assert "CONNECTION LOST" in panel_text
+    assert "connection lost" in status_text.lower()
+    assert shown_after is False
+
+
+
 

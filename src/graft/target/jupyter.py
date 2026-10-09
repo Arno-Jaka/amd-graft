@@ -52,6 +52,12 @@ DEFAULT_RUN_TIMEOUT_S = 900
 # Ceiling on the websocket handshake, so a dead endpoint fails fast instead of
 # inheriting the full command budget.
 CONNECT_TIMEOUT_S = 60
+# A live stream notices a target that vanished silently only if the websocket
+# pings it: protocol pings fail fast when the peer is gone, where a plain read
+# timeout would simply repeat. Chosen short enough to catch a dropped target,
+# long enough not to look like abuse.
+PING_INTERVAL_S = 10
+PING_TIMEOUT_S = 5
 MAX_FRAMES = 200_000
 
 
@@ -261,6 +267,10 @@ class JupyterTransport:
                 # Jupyter's own origin check rejects the Host header a raw
                 # socket sends unless an origin is supplied.
                 origin=self.base,
+                # Ping the peer so a silently dropped server raises instead of
+                # leaving the reader waiting forever.
+                ping_interval=PING_INTERVAL_S,
+                ping_timeout=PING_TIMEOUT_S,
             )
         except (OSError, websocket.WebSocketException) as error:
             raise TransportError(
@@ -337,7 +347,12 @@ class JupyterTransport:
                 except (TimeoutError, websocket.WebSocketTimeoutException):
                     continue
                 if not frame:
-                    break
+                    if stop.is_set():
+                        break
+                    raise TransportError(
+                        f"The live connection to {self.spec.safe_label()} "
+                        "was closed by the target."
+                    )
                 buffer += frame
                 frames += 1
                 if frames > MAX_FRAMES:  # pragma: no cover - backstop

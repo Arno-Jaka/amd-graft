@@ -32,6 +32,11 @@ except ImportError:  # pragma: no cover - exercised by absence, not by test
 CONNECT_TIMEOUT_S = 20
 BANNER_TIMEOUT_S = 30
 AUTH_TIMEOUT_S = 30
+# A live stream only notices a target that vanished silently (deleted instance,
+# dropped route) through the transport's own keepalives. One interval with no
+# reply closes the transport, so a dead peer is caught within roughly twice
+# this value instead of hanging until the kernel gives up.
+KEEPALIVE_S = 10
 
 
 class SSHTransport:
@@ -118,6 +123,9 @@ class SSHTransport:
             raise TransportError(
                 f"Could not reach {self.spec.safe_label()}: {error.strerror or error}"
             ) from error
+        transport = client.get_transport()
+        if transport is not None:
+            transport.set_keepalive(KEEPALIVE_S)
         self._client = client
         return client
 
@@ -206,7 +214,15 @@ class SSHTransport:
                         f"{error.strerror or error}"
                     ) from error
                 if not chunk:
-                    break
+                    # The stream command loops forever, so an EOF is the target
+                    # hanging up, not the command finishing. Report it as a lost
+                    # connection rather than letting the last reading stand.
+                    if stop.is_set():
+                        break
+                    raise TransportError(
+                        f"The live connection to {self.spec.safe_label()} "
+                        "was closed by the target."
+                    )
                 buffer += chunk.decode("utf-8", "replace")
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)

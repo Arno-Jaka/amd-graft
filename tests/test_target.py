@@ -12,6 +12,8 @@ import json
 import shutil
 import subprocess
 import tarfile
+import threading
+import types
 
 import pytest
 
@@ -844,6 +846,111 @@ class TestJupyterCommandDeadline:
         from graft.target.jupyter import DEFAULT_RUN_TIMEOUT_S
 
         assert DEFAULT_RUN_TIMEOUT_S > 0
+
+
+class _DeadChannel:
+    """An SSH channel whose peer has gone: every read is an immediate EOF."""
+
+    def settimeout(self, _value: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        return None
+
+
+class _DeadSSHClient:
+    def exec_command(self, _command: str):
+        return None, types.SimpleNamespace(channel=_DeadChannel()), None
+
+
+class _ClosingSocket:
+    """A terminal socket that reports the peer hung up."""
+
+    def send(self, _payload):
+        return None
+
+    def settimeout(self, _value):
+        return None
+
+    def recv(self):
+        return ""
+
+    def close(self):
+        return None
+
+
+class TestLiveStreamLoss:
+    """A vanished target must be reported as a lost connection.
+
+    The stream command loops forever, so an EOF is the peer hanging up. Before
+    this, the reader treated it as a clean finish and the last reading stayed
+    on screen as if the GPU were still there.
+    """
+
+    def test_ssh_stream_raises_when_the_peer_closes(self):
+        pytest.importorskip("paramiko")
+        from graft.target.ssh import SSHTransport
+
+        spec = parse_form(
+            {"kind": "ssh", "host": "203.0.113.5", "key_path": "/tmp/k"}
+        )
+        transport = SSHTransport(spec)
+        transport._ensure_connected = lambda: _DeadSSHClient()
+        with pytest.raises(TransportError) as caught:
+            transport.stream(
+                "while :; do :; done", lambda line: None, stop=threading.Event()
+            )
+        assert "closed by the target" in str(caught.value)
+
+    def test_ssh_enables_keepalives_so_a_silent_drop_is_noticed(self, monkeypatch):
+        pytest.importorskip("paramiko")
+        from graft.target import ssh
+
+        recorded: dict = {}
+
+        class _Transport:
+            def set_keepalive(self, value):
+                recorded["keepalive"] = value
+
+        class _Client:
+            def load_system_host_keys(self):
+                return None
+
+            def set_missing_host_key_policy(self, _policy):
+                return None
+
+            def connect(self, **_kwargs):
+                return None
+
+            def get_transport(self):
+                return _Transport()
+
+        monkeypatch.setattr(ssh.paramiko, "SSHClient", _Client)
+        spec = parse_form(
+            {"kind": "ssh", "host": "203.0.113.5", "key_path": "/tmp/k"}
+        )
+        ssh.SSHTransport(spec)._ensure_connected()
+        assert recorded["keepalive"] == ssh.KEEPALIVE_S
+
+    def test_jupyter_stream_raises_when_the_peer_closes(self, monkeypatch):
+        pytest.importorskip("websocket")
+        from graft.target.jupyter import JupyterTransport
+
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+        monkeypatch.setattr(transport, "_create_terminal", lambda: "1")
+        monkeypatch.setattr(
+            transport, "_open_socket", lambda _name, _budget: _ClosingSocket()
+        )
+        monkeypatch.setattr(transport, "_delete_terminal", lambda _name: None)
+        with pytest.raises(TransportError) as caught:
+            transport.stream(
+                "while :; do :; done", lambda line: None, stop=threading.Event()
+            )
+        assert "closed by the target" in str(caught.value)
 
 
 class TestUnpackDiagnosis:
