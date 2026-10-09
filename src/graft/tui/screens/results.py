@@ -15,6 +15,9 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Static
 
+from graft.target.dependencies import scan_dependencies
+from graft.target.detect import TargetFacts
+
 NOT_MEASURED = "not measured"
 
 NARRATIVE_TITLES = {
@@ -129,6 +132,26 @@ def _ai_review_rows(review: dict[str, Any]) -> list[Static]:
         )
     )
     return rows
+
+
+def _dependency_lines(facts: Any) -> list[str]:
+    """A short checklist of the tools Graft needs, from the probe's facts."""
+    if not isinstance(facts, dict):
+        return []
+    try:
+        parsed = TargetFacts(**facts)
+    except TypeError:
+        return []
+    lines = ["", "dependencies:"]
+    for dep in scan_dependencies(parsed):
+        if dep.present:
+            mark = "ok"
+        elif dep.required:
+            mark = "MISSING"
+        else:
+            mark = "optional, missing"
+        lines.append(f"  {dep.label}: {mark}")
+    return lines
 
 
 class ResultsScreen(VerticalScroll):
@@ -535,12 +558,33 @@ class ResultsScreen(VerticalScroll):
         )
         self._mount_body(self._remote_body(result))
 
+    def show_dependency_install(
+        self, results: list[dict[str, Any]], facts: dict[str, Any] | None
+    ) -> None:
+        self._reset()
+        failed = [item for item in results if not item.get("ok")]
+        tone = "warning" if failed else "success"
+        self._set_heading("Dependency check", tone)
+        lines: list[str] = []
+        if not results:
+            lines.append("All required dependencies are already present.")
+        for item in results:
+            label = item.get("label") or item.get("key") or "dependency"
+            lines.append(f"{label}: {'installed' if item.get('ok') else 'needs attention'}")
+            if item.get("output"):
+                lines.append(f"  {item['output']}")
+            if item.get("error"):
+                lines.append(f"  {item['error']}")
+        lines.extend(_dependency_lines(facts or {}))
+        self._mount_body(Static("\n".join(lines), markup=False, classes="result-card"))
+
     def _remote_body(self, result: dict[str, Any]) -> Static:
         lines: list[str] = []
         facts = result.get("facts")
         if isinstance(facts, dict):
             for key, value in facts.items():
                 lines.append(f"{key}: {value}")
+            lines.extend(_dependency_lines(facts))
         steps = result.get("steps")
         if isinstance(steps, dict):
             lines.append("")

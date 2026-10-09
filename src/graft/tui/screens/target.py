@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
@@ -25,12 +27,23 @@ from graft import config
 from graft.target import (
     TargetError,
     TransportError,
+    actionable_dependencies,
+    install_dependencies,
     parse_form,
     run_remote,
     run_remote_file,
 )
+from graft.target.detect import TargetFacts, detect
+from graft.target.metrics import (
+    SENTINEL,
+    MetricsSnapshot,
+    local_snapshot,
+    snapshot_from_fields,
+    stream_command,
+)
 from graft.tui.screens.results import ResultsScreen
-from graft.tui.widgets import GPUStatusPanel
+from graft.tui.screens.tips import classify_connection_failure
+from graft.tui.widgets import GPUMetrics, GPUStatusPanel
 
 
 def _field(label: str, control: Input) -> ComposeResult:
@@ -53,6 +66,14 @@ class TargetScreen(Vertical):
         self._converted_source = ""
         self._converted_filename = ""
         self._preview_timer: Timer | None = None
+        # The last successful remote connection, kept so the dependency scan
+        # and the live metrics can re-open the same target without the user
+        # retyping (or re-pasting a token) the form.
+        self._connected_fields: dict[str, Any] | None = None
+        self._connected_facts: dict[str, Any] | None = None
+        self._pending_fields: dict[str, Any] | None = None
+        self._metrics_stop: threading.Event | None = None
+        self._metrics_thread: threading.Thread | None = None
 
     _LOGO = r""" ________    ________     ________    ________   _________
  |\   ____\  |\   __  \   |\   __  \  |\  _____\ |\___   __\
@@ -128,6 +149,11 @@ class TargetScreen(Vertical):
                         id="run-converted",
                         disabled=True,
                     )
+                    yield Button(
+                        "Install missing dependencies",
+                        id="install-deps",
+                        disabled=True,
+                    )
                 yield Static(
                     "Ready · local conversion and parity are available on CPU; GPU timings require an AMD device.",
                     id="status",
@@ -138,6 +164,7 @@ class TargetScreen(Vertical):
             with VerticalScroll(classes="card", id="target-card"):
                 yield Static("COMPUTE TARGET", classes="eyebrow")
                 yield GPUStatusPanel(id="gpu-visual")
+                yield GPUMetrics(id="gpu-metrics")
                 yield Static("Where should Graft run?", classes="card-title")
                 yield Label("GPU location", classes="field-label")
                 yield Select(
@@ -274,6 +301,12 @@ class TargetScreen(Vertical):
     def on_mount(self) -> None:
         self._sync_target_controls()
         self.call_after_refresh(self._apply_layout)
+        # The workspace opens on the local machine, so its readings are the
+        # first thing the panel can show without any connection.
+        self._start_metrics("local")
+
+    def on_unmount(self) -> None:
+        self._stop_metrics()
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_layout()
@@ -307,6 +340,8 @@ class TargetScreen(Vertical):
         if event.select.id in {"location-select", "transport-select"}:
             self._sync_target_controls()
             self._gpu_status("set_waiting", "DETECT THE SELECTED TARGET")
+            if event.select.id == "location-select":
+                self._on_location_changed(str(event.value))
         elif event.select.id == "ai-provider":
             provider = str(event.value)
             model = self.query_one("#ai-model", Input)
@@ -347,6 +382,10 @@ class TargetScreen(Vertical):
         if button_id == "disconnect-remote":
             self._gpu_status("set_disconnected", "TARGET DISCONNECTED")
             self._set_status("Remote GPU disconnected", tone="info")
+            self._connected_fields = None
+            self._connected_facts = None
+            self._refresh_dependency_button()
+            self._start_metrics("local")
             return
         if button_id == "run-local":
             self._start_local_migration()
@@ -372,6 +411,8 @@ class TargetScreen(Vertical):
             self._start_remote("verify")
         elif button_id == "run-converted":
             self._start_remote_file()
+        elif button_id == "install-deps":
+            self._start_dependency_install()
 
     def _browse_source_file(self) -> None:
         current = Path(
@@ -554,6 +595,7 @@ class TargetScreen(Vertical):
 
     def _start_remote(self, mode: str) -> None:
         fields = self._remote_fields()
+        self._pending_fields = dict(fields)
         message = (
             "Detecting the remote target. No files will be uploaded…"
             if mode == "probe"
@@ -601,6 +643,7 @@ class TargetScreen(Vertical):
         fields = self._remote_fields()
         filename = self._converted_filename
         source = self._converted_source
+        self._pending_fields = dict(fields)
         self._set_busy(
             f"Detecting the GPU, uploading {filename}, and running it remotely…"
         )
@@ -787,7 +830,12 @@ class TargetScreen(Vertical):
             self.app.query_one("#results-view", ResultsScreen).show_error(
                 "Remote request failed", message
             )
+            self._pending_fields = None
+            self._maybe_show_tips(message)
         else:
+            self._connected_fields = self._pending_fields
+            self._connected_facts = result.get("facts")
+            self._pending_fields = None
             self._gpu_status("set_target_facts", result.get("facts"))
             state = "ready" if result.get("ok") else "needs attention"
             self._set_status(
@@ -799,7 +847,215 @@ class TargetScreen(Vertical):
                 results.show_remote_file(result)
             else:
                 results.show_remote(result, mode)
+            self._refresh_dependency_button()
+            if self._connected_fields:
+                self._start_metrics("remote", self._connected_fields)
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
+
+    def _refresh_dependency_button(self) -> None:
+        """Enable the install button only when a target is connected and lacks tools."""
+        if not self.is_mounted:
+            return
+        button = self.query_one("#install-deps", Button)
+        if not self._connected_facts:
+            button.disabled = True
+            return
+        try:
+            facts = TargetFacts(**self._connected_facts)
+        except TypeError:
+            button.disabled = True
+            return
+        button.disabled = not actionable_dependencies(facts)
+
+    def _start_dependency_install(self) -> None:
+        if not self._connected_fields or not self._connected_facts:
+            self._show_error("Connect to a target before installing dependencies.")
+            return
+        fields = dict(self._connected_fields)
+        facts = dict(self._connected_facts)
+        self._set_busy("Checking the target for missing dependencies…")
+        self.run_worker(
+            partial(self._run_dependency_install, fields, facts),
+            name="install-deps",
+            group="graft-operation",
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _run_dependency_install(
+        self, fields: dict[str, Any], facts: dict[str, Any]
+    ) -> None:
+        try:
+            spec = parse_form(fields)
+            if spec.kind == "ssh":
+                from graft.target.ssh import SSHTransport
+
+                transport = SSHTransport(spec)
+            else:
+                from graft.target.jupyter import JupyterTransport
+
+                transport = JupyterTransport(spec)
+            with transport:
+                results = install_dependencies(transport, spec, TargetFacts(**facts))
+                refreshed = detect(transport).as_dict()
+            self.app.call_from_thread(self._dependencies_done, results, refreshed, "")
+        except (TargetError, TransportError) as exc:
+            self.app.call_from_thread(self._dependencies_done, [], None, str(exc))
+        except Exception:
+            self.app.call_from_thread(
+                self._dependencies_done,
+                [],
+                None,
+                "Graft could not install the dependencies. Check the target "
+                "details and try again.",
+            )
+
+    def _dependencies_done(
+        self,
+        results: list[dict[str, Any]],
+        refreshed_facts: dict[str, Any] | None,
+        error: str,
+    ) -> None:
+        self.query_one("#ssh-passphrase", Input).value = ""
+        self.query_one("#jupyter-token", Input).value = ""
+        if error:
+            self._set_status(f"Dependency install failed · {error}", is_error=True)
+            self.app.query_one("#results-view", ResultsScreen).show_error(
+                "Dependency install failed", error
+            )
+        else:
+            if refreshed_facts:
+                self._connected_facts = refreshed_facts
+                self._gpu_status("set_target_facts", refreshed_facts)
+            installed = sum(1 for item in results if item.get("ok"))
+            failed = sum(1 for item in results if not item.get("ok"))
+            tone = "success" if not failed else "warning"
+            self._set_status(
+                f"Dependencies checked · {installed} installed · "
+                f"{failed} need attention",
+                tone=tone,
+            )
+            self.app.query_one("#results-view", ResultsScreen).show_dependency_install(
+                results, refreshed_facts
+            )
+        self._refresh_dependency_button()
+        self.app.query_one("#main-tabs", TabbedContent).active = "results"
+
+    def _metrics_widget(self) -> GPUMetrics | None:
+        node = self.query(GPUMetrics)
+        return next(iter(node), None)
+
+    def _on_location_changed(self, location: str) -> None:
+        """Local readings are always available; remote ones need a connection."""
+        if location == "local":
+            self._start_metrics("local")
+        else:
+            self._stop_metrics()
+            widget = self._metrics_widget()
+            if widget is not None:
+                widget.clear("CONNECT TO SEE LIVE TARGET READINGS")
+
+    def _start_metrics(
+        self, source: str, fields: dict[str, Any] | None = None
+    ) -> None:
+        """(Re)start the live-readings loop for a source on a background thread."""
+        self._stop_metrics()
+        stop = threading.Event()
+        self._metrics_stop = stop
+        thread = threading.Thread(
+            target=self._metrics_loop,
+            args=(source, fields, stop),
+            name="graft-metrics",
+            daemon=True,
+        )
+        self._metrics_thread = thread
+        thread.start()
+
+    def _stop_metrics(self) -> None:
+        stop, thread = self._metrics_stop, self._metrics_thread
+        self._metrics_stop = None
+        self._metrics_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            # The stream loops wake within a second, so this join is short and
+            # keeps a torn-down screen from leaving a thread attached to it.
+            thread.join(timeout=2.0)
+
+    def _metrics_loop(
+        self,
+        source: str,
+        fields: dict[str, Any] | None,
+        stop: threading.Event,
+    ) -> None:
+        if source == "remote" and fields is not None:
+            self._remote_metrics_loop(fields, stop)
+        else:
+            self._local_metrics_loop(stop)
+
+    def _local_metrics_loop(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            self._post_metrics(local_snapshot())
+            stop.wait(2.0)
+
+    def _remote_metrics_loop(
+        self, fields: dict[str, Any], stop: threading.Event
+    ) -> None:
+        buffer: dict[str, str] = {}
+
+        def on_line(line: str) -> None:
+            nonlocal buffer
+            stripped = line.strip()
+            if stripped == SENTINEL:
+                if buffer:
+                    self._post_metrics(
+                        snapshot_from_fields(buffer, source="remote")
+                    )
+                    buffer = {}
+                return
+            key, separator, value = stripped.partition("=")
+            if separator:
+                buffer[key.strip()] = value.strip()
+
+        try:
+            spec = parse_form(fields)
+            if spec.kind == "ssh":
+                from graft.target.ssh import SSHTransport
+
+                transport = SSHTransport(spec)
+            else:
+                from graft.target.jupyter import JupyterTransport
+
+                transport = JupyterTransport(spec)
+            with transport:
+                transport.stream(stream_command(1.0), on_line, stop=stop)
+        except (TargetError, TransportError) as exc:
+            self._post_metrics(MetricsSnapshot(source="remote", error=str(exc)))
+        except Exception:
+            self._post_metrics(
+                MetricsSnapshot(source="remote", error="Live readings unavailable")
+            )
+
+    def _post_metrics(self, snapshot: MetricsSnapshot) -> None:
+        # The screen may be gone while a stream is still winding down; a
+        # dropped reading is not worth surfacing.
+        with contextlib.suppress(Exception):
+            self.app.call_from_thread(self._metrics_update, snapshot)
+
+    def _metrics_update(self, snapshot: MetricsSnapshot) -> None:
+        if not self.is_mounted:
+            return
+        widget = self._metrics_widget()
+        if widget is not None:
+            widget.set_metrics(snapshot)
+
+    def _maybe_show_tips(self, error: str) -> None:
+        """Offer troubleshooting only when the failure looks like a ban or auth."""
+        kind = str(self.query_one("#transport-select", Select).value)
+        category = classify_connection_failure(error, kind)
+        if category in {"banned", "auth"}:
+            self.app.show_tips(category, kind, error)
 
 
 __all__ = ["TargetScreen"]

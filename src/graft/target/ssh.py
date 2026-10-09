@@ -9,7 +9,9 @@ environment variable inherited by children.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from pathlib import Path
+from threading import Event
 
 from graft.target.spec import TargetSpec
 from graft.target.transport import (
@@ -165,6 +167,54 @@ class SSHTransport:
             stdout=clip(out),
             stderr=clip(err),
         )
+
+    def stream(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        stop: Event,
+    ) -> None:
+        """Read a long-lived command line by line over one SSH channel.
+
+        The channel stays open for the life of the stream, so a live panel
+        costs one channel and no reconnects, rather than a fresh command every
+        refresh.
+        """
+        client = self._ensure_connected()
+        try:
+            _stdin, stdout, _stderr = client.exec_command(command)
+        except OSError as error:
+            raise TransportError(
+                f"Could not start a stream on {self.spec.safe_label()}: "
+                f"{error.strerror or error}"
+            ) from error
+        channel = stdout.channel
+        # A one-second read timeout lets the loop notice `stop` promptly while
+        # a quiet GPU is simply waiting for its next line.
+        channel.settimeout(1.0)
+        buffer = ""
+        try:
+            while not stop.is_set():
+                try:
+                    chunk = channel.recv(4096)
+                except TimeoutError:
+                    continue
+                except OSError as error:
+                    raise TransportError(
+                        f"Stream failed on {self.spec.safe_label()}: "
+                        f"{error.strerror or error}"
+                    ) from error
+                if not chunk:
+                    break
+                buffer += chunk.decode("utf-8", "replace")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    on_line(line.rstrip("\r"))
+            if buffer.strip():
+                on_line(buffer.rstrip("\r"))
+        finally:
+            channel.close()
 
     def push(self, local: bytes, remote_path: str) -> None:
         client = self._ensure_connected()

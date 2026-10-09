@@ -15,6 +15,8 @@ import base64
 import contextlib
 import json
 import time
+from collections.abc import Callable
+from threading import Event
 from urllib.parse import quote as url_quote
 
 from graft.target.spec import TargetSpec
@@ -249,18 +251,10 @@ class JupyterTransport:
             stderr="",
         )
 
-    def _drive(self, name: str, script: str, timeout_s: int | None) -> str:
-        """Send the script and read the transcript back under a real deadline.
-
-        The budget is enforced against the clock rather than by a fixed
-        per-read timeout. A per-read cap silently truncated long jobs: a remote
-        hipcc compile can print nothing for minutes, and the caller's stated
-        timeout was never consulted at all.
-        """
-        budget = float(timeout_s) if timeout_s else DEFAULT_RUN_TIMEOUT_S
-        deadline = time.monotonic() + budget
+    def _open_socket(self, name: str, budget: float):
+        """Open the terminal websocket, mapping transport failures for the UI."""
         try:
-            socket_ = websocket.create_connection(
+            return websocket.create_connection(
                 self._ws_url(name),
                 header=[f"{TOKEN_HEADER}: token {self.spec.token}"],
                 timeout=max(1.0, min(budget, CONNECT_TIMEOUT_S)),
@@ -272,6 +266,18 @@ class JupyterTransport:
             raise TransportError(
                 f"Could not open a terminal on {self.spec.safe_label()}: {error}"
             ) from error
+
+    def _drive(self, name: str, script: str, timeout_s: int | None) -> str:
+        """Send the script and read the transcript back under a real deadline.
+
+        The budget is enforced against the clock rather than by a fixed
+        per-read timeout. A per-read cap silently truncated long jobs: a remote
+        hipcc compile can print nothing for minutes, and the caller's stated
+        timeout was never consulted at all.
+        """
+        budget = float(timeout_s) if timeout_s else DEFAULT_RUN_TIMEOUT_S
+        deadline = time.monotonic() + budget
+        socket_ = self._open_socket(name, budget)
 
         buffer = ""
         frames = 0
@@ -300,6 +306,50 @@ class JupyterTransport:
         finally:
             socket_.close()
         return buffer
+
+    def stream(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        stop: Event,
+    ) -> None:
+        """Stream a long-lived command's output over one websocket.
+
+        A sentinel-terminated shell loop on the remote prints each reading;
+        this reads the frames and forwards whole lines. The websocket is the
+        same channel ``run`` uses, just held open instead of polled.
+        """
+        name = self._create_terminal()
+        socket_ = self._open_socket(name, CONNECT_TIMEOUT_S)
+        buffer = ""
+        frames = 0
+        try:
+            socket_.send(json.dumps({}))
+            # stty first so the loop's own source text is not echoed back; the
+            # metrics parser ignores lines without a key anyway, but this keeps
+            # the transcript clean. No markers: this command does not end.
+            socket_.send(f"stty -echo 2>/dev/null\n{command}\n")
+            while not stop.is_set():
+                socket_.settimeout(1.0)
+                try:
+                    frame = socket_.recv()
+                except (TimeoutError, websocket.WebSocketTimeoutException):
+                    continue
+                if not frame:
+                    break
+                buffer += frame
+                frames += 1
+                if frames > MAX_FRAMES:  # pragma: no cover - backstop
+                    raise TransportError("Terminal stream did not terminate.")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    on_line(line.rstrip("\r"))
+        except websocket.WebSocketException as error:
+            raise TransportError(f"Terminal session failed: {error}") from error
+        finally:
+            socket_.close()
+            self._delete_terminal(name)
 
     def _create_terminal(self) -> str:
         response = self._request(

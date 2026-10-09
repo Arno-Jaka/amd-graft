@@ -11,6 +11,7 @@ from textual.widgets import Footer, Header, TabbedContent, TabPane
 from graft.tui.screens.loading import LoadingOverlay
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.target import TargetScreen
+from graft.tui.screens.tips import TipsScreen
 
 
 class GraftTUI(App):
@@ -69,6 +70,57 @@ class GraftTUI(App):
         margin-top: 1;
         color: #9aabbd;
         text-align: center;
+    }
+
+    TipsScreen {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #tips-card {
+        width: 82;
+        max-width: 94%;
+        height: auto;
+        max-height: 90%;
+        padding: 1 3;
+        border: round #f4bd55;
+        background: #1a160e;
+        align: center middle;
+    }
+
+    #tips-eyebrow {
+        color: #f4bd55;
+        text-style: bold;
+    }
+
+    #tips-title {
+        margin-top: 1;
+        color: #ffe0a0;
+        text-style: bold;
+    }
+
+    #tips-error {
+        margin-top: 1;
+        color: #ff9ba1;
+    }
+
+    #tips-list {
+        height: auto;
+        max-height: 22;
+        margin-top: 1;
+        scrollbar-color: #6a5326;
+        scrollbar-background: #1a160e;
+    }
+
+    .tip {
+        height: auto;
+        margin-top: 1;
+        color: #e5edf6;
+    }
+
+    #tips-close {
+        width: 100%;
+        margin-top: 1;
     }
 
     Header {
@@ -212,6 +264,17 @@ class GraftTUI(App):
         border: round #9b4853;
         background: #1a1019;
         color: #ff8992;
+    }
+
+    #gpu-metrics {
+        width: 1fr;
+        min-width: 0;
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        color: #8fd8c8;
+        background: transparent;
+        text-align: center;
     }
 
     Input {
@@ -684,6 +747,10 @@ class GraftTUI(App):
         self._loading_overlay = None
         if overlay is not None and self.screen is overlay:
             self.pop_screen()
+
+    def show_tips(self, category: str, kind: str, error: str) -> None:
+        """Open the connection help panel for a classified failure."""
+        self.push_screen(TipsScreen(category, kind, error))
 
 
 def run() -> None:

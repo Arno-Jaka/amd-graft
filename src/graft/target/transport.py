@@ -8,7 +8,9 @@ either implementation leaking into the view layer.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Event
 from typing import Protocol
 
 # Remote output is captured, so it has to be bounded. A chatty toolchain can
@@ -79,6 +81,20 @@ class Transport(Protocol):
         timeout_s: int | None = None,
     ) -> CommandResult:
         """Run a shell command and capture its output."""
+
+    def stream(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        stop: Event,
+    ) -> None:
+        """Run a long-lived command, handing each output line to ``on_line``.
+
+        Returns once the command ends or ``stop`` is set. Used for live
+        readings, where a websocket or a persistent channel avoids reopening a
+        connection on every refresh.
+        """
 
     def push(self, local: bytes, remote_path: str) -> None:
         """Write a file to an absolute path on the remote."""

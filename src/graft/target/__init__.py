@@ -8,6 +8,13 @@ way to render a target for display.
 
 from __future__ import annotations
 
+from graft.target.dependencies import (
+    Dependency,
+    actionable_dependencies,
+    install_dependencies,
+    missing_dependencies,
+    scan_dependencies,
+)
 from graft.target.detect import TargetFacts
 from graft.target.local import local_capability
 from graft.target.remote import RemoteRun, run_remote, run_remote_file
@@ -20,15 +27,20 @@ from graft.target.transport import CommandResult, TransportError, clip, quote
 # Callers wanting detection use run_remote(..., probe_only=True).
 __all__ = [
     "CommandResult",
+    "Dependency",
     "RemoteRun",
     "TargetError",
     "TargetFacts",
     "TargetSpec",
     "TransportError",
+    "actionable_dependencies",
     "clip",
+    "install_dependencies",
     "local_capability",
+    "missing_dependencies",
     "parse_form",
     "quote",
     "run_remote",
     "run_remote_file",
+    "scan_dependencies",
 ]

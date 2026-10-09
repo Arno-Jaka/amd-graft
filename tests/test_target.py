@@ -847,3 +847,194 @@ class TestUnpackDiagnosis:
         )
         # Permission denied is not a path mismatch, so no misleading hint.
         assert "root directory" not in message
+
+
+# --- dependencies -----------------------------------------------------------
+
+
+def _deps_facts(**overrides):
+    from graft.target.detect import TargetFacts
+
+    base: dict = {
+        "ok": True,
+        "os_name": "Ubuntu 24.04.5 LTS",
+        "rocm_version": "6.2.0",
+        "gfx_arch": "gfx942",
+        "gpu_count": 1,
+        "gpu_name": "AMD Instinct MI300X",
+        "tools": {
+            "hipcc": "/opt/rocm/bin/hipcc",
+            "hipify-perl": "/opt/rocm/bin/hipify-perl",
+        },
+        "python_path": "/usr/bin/python3",
+    }
+    base.update(overrides)
+    return TargetFacts(**base)
+
+
+class TestDependencyScan:
+    def test_a_complete_target_has_nothing_actionable(self):
+        from graft.target.dependencies import actionable_dependencies
+
+        facts = _deps_facts(torch_version="2.4.0+rocm6.2")
+        assert actionable_dependencies(facts) == []
+
+    def test_torch_is_actionable_but_not_required(self):
+        from graft.target.dependencies import (
+            actionable_dependencies,
+            missing_dependencies,
+        )
+
+        facts = _deps_facts(torch_version="")
+        assert [dep.key for dep in actionable_dependencies(facts)] == ["torch"]
+        # PyTorch is optional, so it is not a blocking gap.
+        assert missing_dependencies(facts) == []
+
+    def test_torch_install_uses_the_rocm_wheel_index(self):
+        from graft.target.dependencies import scan_dependencies
+
+        torch = next(
+            dep for dep in scan_dependencies(_deps_facts()) if dep.key == "torch"
+        )
+        assert "https://download.pytorch.org/whl/rocm6.2" in torch.command
+        assert "ROCm 6.2" in torch.detail
+
+    def test_an_unknown_rocm_version_falls_back_to_pypi_with_a_warning(self):
+        from graft.target.dependencies import scan_dependencies
+
+        facts = _deps_facts(rocm_version="")
+        torch = next(dep for dep in scan_dependencies(facts) if dep.key == "torch")
+        assert "rocm" not in torch.command.split("index-url")[-1]
+        assert "unknown" in torch.detail.lower()
+
+    def test_a_non_debian_target_gets_a_manual_hint_not_a_command(self):
+        from graft.target.dependencies import (
+            missing_dependencies,
+            scan_dependencies,
+        )
+
+        facts = _deps_facts(os_name="Red Hat Enterprise Linux 9", tools={})
+        hipcc = next(dep for dep in scan_dependencies(facts) if dep.key == "hipcc")
+        assert hipcc.present is False
+        assert hipcc.command == ""
+        assert "not apt-based" in hipcc.detail
+        assert "hipcc" in [dep.key for dep in missing_dependencies(facts)]
+
+
+class TestDependencyInstall:
+    def test_only_the_missing_installable_commands_run(self):
+        from graft.target.dependencies import install_dependencies
+
+        # hipcc is present; hipify-perl and torch are missing and installable.
+        facts = _deps_facts(tools={"hipcc": "/opt/rocm/bin/hipcc"})
+        transport = FakeTransport()
+        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
+        results = install_dependencies(transport, spec, facts)
+
+        assert len(transport.commands) == 2
+        assert "apt-get install -y rocm-hip-sdk" in transport.commands[0]
+        assert any("install torch" in c for c in transport.commands)
+        assert all(item["ok"] for item in results)
+
+    def test_a_manual_gap_is_reported_and_nothing_else_runs(self):
+        from graft.target.dependencies import install_dependencies
+
+        facts = _deps_facts(
+            os_name="Red Hat Enterprise Linux 9",
+            tools={"hipify-perl": "/x"},
+        )
+        transport = FakeTransport()
+        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
+        results = install_dependencies(transport, spec, facts)
+
+        # hipcc cannot be auto-installed here, but torch still can.
+        assert all("apt-get" not in c for c in transport.commands)
+        manual = [item for item in results if item["key"] == "hipcc"]
+        assert manual and manual[0]["ok"] is False
+        assert "not apt-based" in manual[0]["error"]
+
+    def test_a_failed_command_is_reported_not_raised(self):
+        from graft.target.dependencies import install_dependencies
+
+        facts = _deps_facts(tools={})  # hipify-perl and hipcc missing
+        transport = FakeTransport(
+            {"apt-get": CommandResult("apt", 100, "", "E: Unable to locate package")}
+        )
+        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
+        results = install_dependencies(transport, spec, facts)
+
+        failed = [item for item in results if not item["ok"]]
+        assert failed
+        assert "Unable to locate package" in failed[0]["error"]
+
+    def test_progress_is_reported_per_dependency(self):
+        from graft.target.dependencies import install_dependencies
+
+        seen: list[str] = []
+        facts = _deps_facts(tools={"hipcc": "/x"})
+        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
+        install_dependencies(
+            FakeTransport(), spec, facts, on_progress=lambda key, _: seen.append(key)
+        )
+        assert "torch" in seen
+
+
+# --- metrics ----------------------------------------------------------------
+
+
+class TestMetrics:
+    def test_parse_reads_the_known_keys(self):
+        from graft.target.metrics import parse_metrics
+
+        snapshot = parse_metrics(
+            "vram_total_bytes=100\nvram_used_bytes=40\n"
+            "gpu_util_pct=12\ntemp_c=52\npower_w=143\n"
+            "disk_total_bytes=1000\ndisk_used_bytes=250\n"
+            "gpu_name=AMD Instinct MI300X\n"
+        )
+        assert snapshot.vram_used_bytes == 40
+        assert snapshot.vram_total_bytes == 100
+        assert snapshot.gpu_util_pct == 12
+        assert snapshot.temp_c == 52
+        assert snapshot.disk_used_bytes == 250
+        assert snapshot.gpu_name == "AMD Instinct MI300X"
+
+    def test_unknown_and_blank_values_stay_unmeasured(self):
+        from graft.target.metrics import parse_metrics
+
+        snapshot = parse_metrics("vram_total_bytes=\ngpu_util_pct=nonsense\n")
+        assert snapshot.vram_total_bytes == -1
+        assert snapshot.gpu_util_pct == -1
+
+    def test_the_sample_command_is_a_single_reading(self):
+        from graft.target.metrics import sample_command
+
+        command = sample_command()
+        assert "while :" not in command
+        assert "mem_info_vram_used" in command
+        assert "df -P -B1" in command
+        # The sensor node names differ per card, so both families are globbed.
+        assert "temp*_input" in command
+        assert "power1_input" in command
+
+    def test_the_stream_command_loops_and_marks_each_reading(self):
+        from graft.target.metrics import SENTINEL, stream_command
+
+        command = stream_command(0.5)
+        assert "while :" in command
+        assert SENTINEL in command
+        assert "sleep 0.5" in command
+
+    def test_the_stream_interval_has_a_floor(self):
+        from graft.target.metrics import stream_command
+
+        assert "sleep 0.2" in stream_command(0.0)
+
+    def test_local_snapshot_always_reports_disk(self):
+        from graft.target.metrics import local_snapshot
+
+        usage = shutil.disk_usage("/")
+        snapshot = local_snapshot()
+        assert snapshot.source == "local"
+        assert snapshot.disk_total_bytes == usage.total
+

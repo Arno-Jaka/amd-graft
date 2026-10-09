@@ -9,6 +9,8 @@ from typing import Any
 from textual import events
 from textual.widgets import Static
 
+from graft.target.metrics import MetricsSnapshot
+
 
 class GPUStatusPanel(Static):
     """A dual-fan GPU silhouette rasterized with the terminal's Braille dots."""
@@ -275,4 +277,81 @@ class GPUStatusPanel(Static):
         self.update("\n".join(lines))
 
 
-__all__ = ["GPUStatusPanel"]
+class GPUMetrics(Static):
+    """Live VRAM, disk, utilization, temperature, and power under the GPU.
+
+    Every reading is optional. A field that could not be measured shows as
+    "not measured" rather than a zero, so an unreadable sensor is never
+    mistaken for an idle GPU.
+    """
+
+    BAR_WIDTH = 18
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("markup", False)
+        self._snapshot: MetricsSnapshot | None = None
+        self._message = "AWAITING A TARGET FOR LIVE READINGS"
+        super().__init__("", *args, **kwargs)
+        self._render_panel()
+
+    def on_mount(self) -> None:
+        self._render_panel()
+
+    def set_metrics(self, snapshot: MetricsSnapshot) -> None:
+        self._snapshot = snapshot
+        self._message = snapshot.error
+        self._render_panel()
+
+    def clear(self, message: str = "AWAITING A TARGET FOR LIVE READINGS") -> None:
+        self._snapshot = None
+        self._message = message
+        self._render_panel()
+
+    @staticmethod
+    def _bar(fraction: float, width: int = BAR_WIDTH) -> str:
+        fraction = max(0.0, min(1.0, fraction))
+        filled = round(fraction * width)
+        return "█" * filled + "░" * (width - filled)
+
+    @staticmethod
+    def _gb(value: int) -> str:
+        return f"{value / 1_000_000_000:.1f}"
+
+    def _usage(self, label: str, used: int, total: int) -> str:
+        if used < 0 or total <= 0:
+            return f"{label}  {'not measured':<40}"
+        fraction = used / total
+        return (
+            f"{label}  {self._bar(fraction)}  {fraction * 100:3.0f}%  "
+            f"{self._gb(used)}/{self._gb(total)} GB"
+        )
+
+    def _utilization(self, pct: float) -> str:
+        if pct < 0:
+            return f"UTIL  {'not measured':<40}"
+        return f"UTIL  {self._bar(pct / 100)}  {pct:3.0f}%"
+
+    def _render_panel(self) -> None:
+        snapshot = self._snapshot
+        if snapshot is None:
+            self.update(self._message)
+            return
+        gauges: list[str] = []
+        if snapshot.temp_c >= 0:
+            gauges.append(f"{snapshot.temp_c:.0f}°C")
+        if snapshot.power_w >= 0:
+            gauges.append(f"{snapshot.power_w:.0f} W")
+        if snapshot.gpu_name:
+            gauges.append(snapshot.gpu_name)
+        source = "TARGET" if snapshot.source == "remote" else "LOCAL"
+        footer = " · ".join(gauges) if gauges else (snapshot.error or "no gauges")
+        lines = [
+            self._usage("VRAM", snapshot.vram_used_bytes, snapshot.vram_total_bytes),
+            self._usage("DISK", snapshot.disk_used_bytes, snapshot.disk_total_bytes),
+            self._utilization(snapshot.gpu_util_pct),
+            f"[{source}] {footer}",
+        ]
+        self.update("\n".join(lines))
+
+
+__all__ = ["GPUMetrics", "GPUStatusPanel"]

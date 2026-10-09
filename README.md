@@ -62,6 +62,19 @@ never compiled reads as *"PRODUCTION READY (text analysis only)"* rather than
 as a completed verification. Anything unmeasured says `not measured` instead
 of rendering a zero or an empty panel.
 
+Under the GPU panel, live readings stream from whichever machine is selected:
+VRAM, GPU utilization, temperature, power, and disk, drawn as bars. Remote
+readings arrive over the connection already open — an SSH channel or the
+Jupyter websocket — rather than a reconnect per refresh. A sensor that cannot
+be read shows `not measured`, never a zero that reads as idle.
+
+When a target connects, Graft lists the tools the pipeline needs and marks
+what is missing. For the pieces it can install it offers the exact command, and
+installs nothing until that button is pressed, because the installs are
+system-wide and can be large. A connection that fails authentication — or that
+a host's fail2ban has banned — opens a short help panel with the unban command
+instead of a bare error.
+
 **Security.** The UI accepts code, so it is built as if that mattered:
 
 - The TUI process never calls `pipeline.run()`. A migration runs in a
@@ -90,9 +103,12 @@ Without them, choosing the Jupyter transport fails with a message naming the
 missing package and pointing at the SSH option; SSH and local runs are
 unaffected.
 
-Jupyter is implemented but has not been validated against a live server. It is
-the least-exercised path, so treat a first connection as a test of the
-transport as much as of the code.
+SSH has been validated end to end against an AMD Instinct MI300X (gfx942,
+ROCm 6.x): the probe read the card, `hipify-perl` converted the examples,
+`hipcc --offload-arch=gfx942` compiled them, and the HIP kernels ran within
+tolerance. Jupyter is implemented but has not been validated against a live
+server. It is the least-exercised path, so treat a first connection as a test
+of the transport as much as of the code.
 
 ## Architecture
 
@@ -152,13 +168,16 @@ Deterministic stages are done and tested on CPU:
 | Terminal UI | `tui/` | done, Textual |
 | Upload containment | `worker.py` | done, disposable child per migration |
 | CLI | `main.py` | done, `migrate` / `tui` / `doctor` |
-| Remote targets | `target/` | SSH done; Jupyter implemented, unvalidated live |
+| Remote targets | `target/` | SSH verified on an MI300X; Jupyter implemented, unvalidated live |
+| Dependency scan | `target/dependencies.py` | done, install is opt-in |
+| Live target readings | `target/metrics.py` | local via torch; remote over the transport stream |
 
-Not yet done: verification on real AMD hardware, which cannot be done from
-here.
+Not yet done: Jupyter against a live server, and recalibrating the benchmark
+noise bands on a real GPU.
 
-ROCm has not been executed. Everything above was verified on a CPU-only
-PyTorch build, so the AMD-specific claims are unproven until the code runs
-on real hardware. In particular, `hipify-perl` has never been invoked and
-`bench/` has never compared two runs on a GPU, so its noise bands are
-calibrated from CPU measurements and are probably too loose.
+The HIP path has been exercised on real hardware: on an AMD Instinct MI300X,
+`hipify-perl` converted the examples, `hipcc --offload-arch=gfx942` compiled
+them, and the kernels ran within tolerance. The remaining gap is breadth, not
+the smoke test — a single architecture was tested, and PyTorch was not
+installed on that host, so the benchmark bands are still the CPU-calibrated
+ones and are probably too loose.
