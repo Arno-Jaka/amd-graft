@@ -32,6 +32,7 @@ from graft.target import (
     parse_form,
     run_remote,
     run_remote_file,
+    scan_dependencies,
 )
 from graft.target.detect import TargetFacts, detect
 from graft.target.metrics import (
@@ -858,15 +859,18 @@ class TargetScreen(Vertical):
             )
             self.app.query_one("#results-view", ResultsScreen).show_local_probe(facts)
             # A local machine is a target too: check it for the tools the
-            # pipeline needs the moment it is inspected.
+            # pipeline needs the moment it is inspected, but only interrupt
+            # with the overlay when something actually wants attention.
             try:
                 from graft.target.local import local_target_facts
 
-                self._show_dependency_overlay(
-                    local_target_facts(),
-                    fields=None,
-                    label="this machine",
-                )
+                local_facts = local_target_facts()
+                if self._has_missing_dependencies(local_facts):
+                    self._show_dependency_overlay(
+                        local_facts,
+                        fields=None,
+                        label="this machine",
+                    )
             except Exception:
                 pass
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
@@ -904,8 +908,13 @@ class TargetScreen(Vertical):
             )
             # The moment a target connects, check it for the tools the
             # pipeline needs and say what is missing, rather than waiting
-            # for the first operation to fail on one.
-            if mode in ("probe", "verify") and self._connected_facts:
+            # for the first operation to fail on one. Verification is an
+            # explicit "show me the result" action, so it never has an
+            # overlay thrown over its findings, and a fully-equipped target
+            # needs no overlay at all.
+            if mode == "probe" and self._has_missing_dependencies(
+                self._connected_facts
+            ):
                 self._show_dependency_overlay(
                     self._connected_facts,
                     fields=self._connected_fields,
@@ -1075,6 +1084,16 @@ class TargetScreen(Vertical):
                 actionable = []
         button.disabled = not actionable
         button.display = bool(actionable)
+
+    def _has_missing_dependencies(self, facts: dict[str, Any] | None) -> bool:
+        """True when the connected target lacks at least one checked tool."""
+        if not facts:
+            return False
+        try:
+            parsed = TargetFacts(**facts)
+        except TypeError:
+            return False
+        return any(not dep.present for dep in scan_dependencies(parsed))
 
     def _blocking_dependencies(self, suffix: str | None) -> list[Any]:
         """Tools absent on the connected target that would fail this operation.

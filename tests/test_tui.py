@@ -994,6 +994,50 @@ def test_a_remote_probe_opens_the_dependency_overlay_and_lists_missing_tools():
     assert disabled is False
 
 
+def test_a_probe_of_a_fully_equipped_target_does_not_open_the_overlay():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            await pilot.pause()
+            screen = app.query_one(TargetScreen)
+            screen._remote_done(
+                {"ok": True, "facts": _target_facts(torch_version="2.4.0+rocm6.2")},
+                "probe",
+                "",
+            )
+            await pilot.pause()
+            return type(app.screen).__name__, app.query_one("#main-tabs").active
+
+    name, active = asyncio.run(main())
+    assert name != "DependencyOverlay"
+    assert active == "results"
+
+
+def test_verify_shows_its_results_instead_of_an_overlay():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            await pilot.pause()
+            screen = app.query_one(TargetScreen)
+            # Even with a tool missing, verification is an explicit "show me
+            # the result" action and must not be covered by the overlay.
+            screen._remote_done(
+                {
+                    "ok": True,
+                    "facts": _target_facts(torch_version=""),
+                    "verdict": "verified",
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            return type(app.screen).__name__, app.query_one("#main-tabs").active
+
+    name, active = asyncio.run(main())
+    assert name != "DependencyOverlay"
+    assert active == "results"
+
+
 def test_the_dependency_overlay_reports_live_install_progress():
     async def main():
         app = GraftTUI()
