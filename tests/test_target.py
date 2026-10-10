@@ -672,6 +672,9 @@ class TestJupyterVersionGate:
     @pytest.mark.parametrize(
         ("version", "supported"),
         [
+            ("0.9.0", False),
+            ("1.5.0", True),
+            ("2.21.1", True),
             ("4.4.2", False),
             ("5.7.0", True),
             ("6.5.7", True),

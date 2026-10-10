@@ -62,14 +62,22 @@ MAX_FRAMES = 200_000
 
 
 def supports_terminal_api(version: str) -> bool:
-    """True when a Jupyter major version has the terminal API Graft needs.
+    """True when a Jupyter version has the terminal API Graft needs.
 
-    Compared as a number rather than against a list of prefixes: 8 is the
-    current release and its terminal API is unchanged, so a prefix test
-    refused most real deployments.
+    The string is ambiguous because it comes from either product. A modern
+    ``jupyter_server`` reports its own version (1.x, 2.x), where the terminal
+    API has existed since 1.0. A legacy ``notebook`` server reports the
+    notebook version, and only 5.0 added terminals, so 4.x is the one case
+    that must be refused. Reading it as "5 or newer" rejected every current
+    jupyter_server deployment.
     """
     major_text = version.split(".", 1)[0]
-    return major_text.isdigit() and int(major_text) >= 5
+    if not major_text.isdigit():
+        return False
+    major = int(major_text)
+    if major == 4:
+        return False
+    return major >= 1
 
 
 def _timeout_message(spec: TargetSpec, budget: float) -> str:
@@ -187,19 +195,24 @@ class JupyterTransport:
     # -- lifecycle --------------------------------------------------------
 
     def probe(self) -> None:
-        status = self._request(
+        self._request(
             "GET", "/api/status", what="checking server status", timeout=20
         )
+        # The server version comes from the API root, not /api/status, which
+        # only reports live connection counts. Ask the root for it, but treat a
+        # failure to read it as "unknown" and let the terminal test below be
+        # the real gate rather than refusing a server we simply can't identify.
         version = "unknown"
-        with contextlib.suppress(ValueError, AttributeError):
-            version = (status.json().get("version") or "unknown").lower()
-        # /api/status is unauthenticated on many deployments, so success here
+        with contextlib.suppress(ValueError, AttributeError, TransportError):
+            info = self._request("GET", "/api", what="checking server version", timeout=20)
+            version = (info.json().get("version") or "unknown").lower()
+        # /api/status is unauthenticated on many deployments, so success there
         # does not prove the token works. Ask for something that is gated.
         self._request("GET", "/api/contents/", what="listing files", timeout=20)
-        if not supports_terminal_api(version):
+        if version != "unknown" and not supports_terminal_api(version):
             raise TransportError(
-                f"Jupyter version {version} is not supported. Graft needs 5 or "
-                "newer for the terminal API."
+                f"Jupyter version {version} is not supported. Graft needs the "
+                "terminal API, which arrived in notebook 5 / jupyter_server 1."
             )
         # Prove the terminal path works too, which is what every command needs.
         result = self.run("echo graft-probe-ok")
@@ -367,9 +380,12 @@ class JupyterTransport:
             self._delete_terminal(name)
 
     def _create_terminal(self) -> str:
+        # The REST terminal endpoints live under /api, unlike the websocket the
+        # commands actually run over. Posting to /terminals returns 404 on a
+        # real server, which read as "no terminal API" and refused the target.
         response = self._request(
             "POST",
-            "/terminals",
+            "/api/terminals",
             what="starting a terminal",
             timeout=30,
             data=json.dumps({}),
@@ -391,7 +407,7 @@ class JupyterTransport:
         # command over, and not worth telling the user about.
         with contextlib.suppress(requests.exceptions.RequestException):
             self.session.delete(
-                self._url(f"/terminals/{url_quote(name)}"),
+                self._url(f"/api/terminals/{url_quote(name)}"),
                 headers=self._headers(),
                 timeout=15,
             )
