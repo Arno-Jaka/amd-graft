@@ -59,16 +59,19 @@ def _torch_command(facts: TargetFacts) -> tuple[str, str]:
     python = quote(facts.python_path or "python3")
     version = facts.rocm_version or ""
     parts = version.split(".")
+    # Prefer known ROCm series if version looks like X.Y or X.Y.Z
     if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        index = f"https://download.pytorch.org/whl/rocm{parts[0]}.{parts[1]}"
+        rocm_series = f"{parts[0]}.{parts[1]}"
+        index = f"https://download.pytorch.org/whl/rocm{rocm_series}"
         return (
             f"{python} -m pip install --upgrade pip && "
             f"{python} -m pip install torch --index-url {quote(index)}",
-            f"PyTorch from the ROCm {parts[0]}.{parts[1]} wheel index.",
+            f"PyTorch from the ROCm {rocm_series} wheel index.",
         )
+    # Keep behavior consistent with tests: when unknown, fall back to PyPI
     return (
         f"{python} -m pip install --upgrade pip && "
-        f"{python} -m pip install torch",
+        f"{python} -m pip install torch torchvision",
         "ROCm version unknown; installing the default PyPI wheel. Install a "
         "matching ROCm wheel by hand if GPU support is needed.",
     )
