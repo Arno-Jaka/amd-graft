@@ -501,6 +501,17 @@ class GraftTUI(App):
         height: auto;
     }
 
+    #jupyter-token-row {
+        height: auto;
+        layout: horizontal;
+    }
+
+    #detect-token {
+        width: auto;
+        min-width: 15;
+        margin: 1 0 0 1;
+    }
+
     .button-row {
         height: auto;
         margin-top: 1;

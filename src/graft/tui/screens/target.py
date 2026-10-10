@@ -7,6 +7,7 @@ import threading
 from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 from textual import events
 from textual.app import ComposeResult
@@ -28,6 +29,7 @@ from graft.target import (
     TargetError,
     TransportError,
     actionable_dependencies,
+    discover_jupyter_token,
     missing_dependencies,
     parse_form,
     run_remote,
@@ -46,6 +48,15 @@ from graft.tui.screens.deps import DependencyOverlay
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.tips import classify_connection_failure
 from graft.tui.widgets import GPUMetrics, GPUStatusPanel
+
+# Shown with an SSH target's detection result. SSH runs on the host, so a GPU
+# image that keeps PyTorch/ROCm inside a container looks empty here even though
+# the hardware works; pointing at the Jupyter option saves the confusion.
+SSH_TORCH_DISCLAIMER = (
+    "Note: SSH checks the host, not any container running on it. If this image "
+    "keeps PyTorch/ROCm inside a container (e.g. a “rocm” container), Graft "
+    "cannot see them from here — connect with the Jupyter transport instead."
+)
 
 
 def _field(label: str, control: Input) -> ComposeResult:
@@ -231,6 +242,11 @@ class TargetScreen(Vertical):
                             "The named key is used for this request and is not saved by Graft.",
                             classes="hint",
                         )
+                        yield Static(
+                            SSH_TORCH_DISCLAIMER,
+                            id="ssh-disclaimer",
+                            classes="hint",
+                        )
 
                     with (
                         Vertical(id="jupyter-config", classes="hidden"),
@@ -253,14 +269,14 @@ class TargetScreen(Vertical):
                                 ),
                             )
                         with Vertical(classes="field"):
-                            yield from _field(
-                                "Token",
-                                Input(
+                            yield Label("Token", classes="field-label")
+                            with Horizontal(id="jupyter-token-row"):
+                                yield Input(
                                     password=True,
                                     placeholder="Jupyter token",
                                     id="jupyter-token",
-                                ),
-                            )
+                                )
+                                yield Button("Detect token", id="detect-token")
 
                     with (
                         Collapsible(
@@ -441,6 +457,8 @@ class TargetScreen(Vertical):
             self._start_remote_file()
         elif button_id == "install-deps":
             self._start_dependency_install()
+        elif button_id == "detect-token":
+            self._detect_jupyter_token()
 
     def _browse_source_file(self) -> None:
         current = Path(
@@ -720,6 +738,89 @@ class TargetScreen(Vertical):
                 "Graft could not upload or run the converted file. Check the target details and try again.",
             )
 
+    def _remote_host(self) -> str:
+        """The machine to SSH into for token discovery.
+
+        Prefers the SSH host field; falls back to the Jupyter host reduced to a
+        bare hostname so a pasted URL still works.
+        """
+        host = self.query_one("#ssh-host", Input).value.strip()
+        if host:
+            return host
+        raw = self.query_one("#jupyter-host", Input).value.strip()
+        if not raw:
+            return ""
+        if "://" in raw:
+            return urlsplit(raw).hostname or ""
+        return raw.split(":", 1)[0].split("/", 1)[0]
+
+    def _detect_jupyter_token(self) -> None:
+        """Log into the host over SSH and load the Jupyter token it finds."""
+        host = self._remote_host()
+        key_path = self.query_one("#ssh-key-path", Input).value.strip()
+        if not host or not key_path:
+            self._show_error(
+                "Fill in the SSH host and private key path so Graft can log in "
+                "and find the token."
+            )
+            return
+        username = (
+            self.query_one("#ssh-username", Input).value.strip()
+            or self.query_one("#jupyter-username", Input).value.strip()
+            or "root"
+        )
+        fields = {
+            "kind": "ssh",
+            "host": host,
+            "username": username,
+            "key_path": key_path,
+            "key_passphrase": self.query_one("#ssh-passphrase", Input).value,
+            "port": self.query_one("#remote-port", Input).value,
+            "remote_dir": self.query_one("#remote-dir", Input).value,
+            "command_timeout_s": self.query_one("#remote-timeout", Input).value,
+        }
+        self._set_busy("Looking for a Jupyter token on the host and its containers…")
+        self.run_worker(
+            partial(self._run_token_detection, fields),
+            name="detect-token",
+            group="graft-operation",
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _run_token_detection(self, fields: dict[str, Any]) -> None:
+        try:
+            spec = parse_form(fields)
+            from graft.target.ssh import SSHTransport
+
+            transport = SSHTransport(spec)
+            with transport:
+                token = discover_jupyter_token(transport)
+            self.app.call_from_thread(self._token_detection_done, token, "")
+        except (TargetError, TransportError, ValueError) as exc:
+            self.app.call_from_thread(self._token_detection_done, "", str(exc))
+        except Exception:
+            self.app.call_from_thread(
+                self._token_detection_done,
+                "",
+                "Graft could not reach the host to look for a token. Check the "
+                "SSH details and try again.",
+            )
+
+    def _token_detection_done(self, token: str, error: str) -> None:
+        if error or not token:
+            self._set_status(
+                f"Token detection failed · {error or 'no token found'}",
+                is_error=True,
+            )
+            return
+        self.query_one("#jupyter-token", Input).value = token
+        self._set_status(
+            "Jupyter token found and loaded · it stays in this form only",
+            tone="success",
+        )
+
     def _run_remote(self, mode: str, fields: dict[str, Any]) -> None:
         try:
             spec = parse_form(fields)
@@ -933,7 +1034,12 @@ class TargetScreen(Vertical):
                 else:
                     results.show_remote_file(result)
             else:
-                results.show_remote(result, mode)
+                note = ""
+                if mode == "probe" and (self._connected_fields or {}).get(
+                    "kind"
+                ) == "ssh":
+                    note = SSH_TORCH_DISCLAIMER
+                results.show_remote(result, mode, note=note)
             self._refresh_dependency_button()
             if self._connected_fields:
                 self._start_metrics("remote", self._connected_fields)

@@ -1296,3 +1296,41 @@ class TestLocalSysfsMetrics:
 
         monkeypatch.setattr(metrics_module.glob, "glob", lambda pattern: [])
         assert metrics_module._local_sysfs_fields() == {}
+
+    def test_parse_jupyter_token_extracts_known_formats(self):
+        from graft.target import token
+
+        assert token.parse_jupyter_token("http://h:8888/?token=abc123DEF") == "abc123DEF"
+        assert token.parse_jupyter_token('"token": "TK/xyz123"') == "TK/xyz123"
+        assert token.parse_jupyter_token("ServerApp.token='ABCD1234abcd'") == "ABCD1234abcd"
+        assert token.parse_jupyter_token("no token here") == ""
+        assert token.parse_jupyter_token('"token": "disabled"') == ""
+
+    def test_discover_jupyter_token_runs_script_and_returns_first_match(self):
+        from graft.target import TargetError
+        from graft.target.token import TOKEN_DISCOVERY_SCRIPT, discover_jupyter_token
+
+        class T:
+            def __init__(self):
+                self.cmds = []
+
+            def run(self, command, *, cwd=None, timeout_s=None):
+                self.cmds.append(command)
+                return CommandResult("s", 0, '{"token":"ABCDEF123456"}', "")
+
+        t = T()
+        got = discover_jupyter_token(t, timeout_s=5)
+        assert got == "ABCDEF123456"
+        assert t.cmds[0] == TOKEN_DISCOVERY_SCRIPT
+        assert len(t.cmds) == 1
+
+    def test_discover_jupyter_token_raises_when_nothing_found(self):
+        from graft.target import TargetError
+        from graft.target.token import discover_jupyter_token
+
+        class T:
+            def run(self, command, *, cwd=None, timeout_s=None):
+                return CommandResult("s", 0, "", "")
+
+        with pytest.raises(TargetError):
+            discover_jupyter_token(T())

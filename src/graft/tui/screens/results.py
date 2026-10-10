@@ -625,14 +625,14 @@ class ResultsScreen(VerticalScroll):
         self._set_heading("Converted file run on GPU", "success" if ok else "error")
         self._mount_body(self._remote_body(result))
 
-    def show_remote(self, result: dict[str, Any], mode: str) -> None:
+    def show_remote(self, result: dict[str, Any], mode: str, note: str = "") -> None:
         self._reset()
         ok = bool(result.get("ok"))
         self._set_heading(
             f"Remote {'detect' if mode == 'probe' else 'verification'}",
             "success" if ok else "error",
         )
-        self._mount_body(self._remote_body(result))
+        self._mount_body(self._remote_body(result, note))
 
     def show_dependency_install(
         self, results: list[dict[str, Any]], facts: dict[str, Any] | None
@@ -654,7 +654,7 @@ class ResultsScreen(VerticalScroll):
         lines.extend(_dependency_lines(facts or {}))
         self._mount_body(Static("\n".join(lines), markup=False, classes="result-card"))
 
-    def _remote_body(self, result: dict[str, Any]) -> Static:
+    def _remote_body(self, result: dict[str, Any], note: str = "") -> Static:
         lines: list[str] = []
         facts = result.get("facts")
         if isinstance(facts, dict):
@@ -675,6 +675,9 @@ class ResultsScreen(VerticalScroll):
         if error:
             lines.append("")
             lines.append(f"error: {error}")
+        if note:
+            lines.append("")
+            lines.append(note)
         return Static(
             "\n".join(lines) or "No details returned.",
             markup=False,

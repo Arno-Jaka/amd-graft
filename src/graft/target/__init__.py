@@ -19,6 +19,7 @@ from graft.target.detect import TargetFacts
 from graft.target.local import LocalTransport, local_capability, local_target_facts
 from graft.target.remote import RemoteRun, run_remote, run_remote_file
 from graft.target.spec import TargetError, TargetSpec, parse_form
+from graft.target.token import discover_jupyter_token, parse_jupyter_token
 from graft.target.transport import CommandResult, TransportError, clip, quote
 
 # graft.target.detect.detect is deliberately not re-exported here. A bare
@@ -36,11 +37,13 @@ __all__ = [
     "TransportError",
     "actionable_dependencies",
     "clip",
+    "discover_jupyter_token",
     "install_dependencies",
     "local_capability",
     "local_target_facts",
     "missing_dependencies",
     "parse_form",
+    "parse_jupyter_token",
     "quote",
     "run_remote",
     "run_remote_file",
