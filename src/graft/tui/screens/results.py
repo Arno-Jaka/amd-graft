@@ -20,6 +20,20 @@ from graft.target.detect import TargetFacts
 
 NOT_MEASURED = "not measured"
 
+
+def numbered_source(source: str) -> str:
+    """Render source with a right-aligned line-number gutter, like an IDE.
+
+    The gutter is three columns wide for files up to 999 lines, which covers
+    everything the UI will preview (the upload limit is 1 MB of source); past
+    that it grows rather than misaligning.
+    """
+    lines = source.splitlines()
+    width = max(3, len(str(len(lines) or 1)))
+    return "\n".join(
+        f"{index:>{width}} │ {line}" for index, line in enumerate(lines, start=1)
+    )
+
 NARRATIVE_TITLES = {
     "narration": "Summary",
     "parity_explainer": "Parity, explained",
@@ -291,9 +305,16 @@ class ResultsScreen(VerticalScroll):
             self._mount_body(Static(message, markup=False, classes="result-card"))
             return
         self._set_heading(f"Source preview · {name}", "info")
+        body = source or ""
+        line_count = len(body.splitlines())
         self._mount_body(
             Static(path, markup=False, classes="result-kv"),
-            Static(source or "", markup=False, classes="source-pane"),
+            Static(
+                f"{line_count} line(s) · read-only preview",
+                markup=False,
+                classes="result-kv",
+            ),
+            Static(numbered_source(body), markup=False, classes="source-pane"),
         )
 
     def show_local(
@@ -543,10 +564,12 @@ class ResultsScreen(VerticalScroll):
             *ai_section,
             Static("SOURCE COMPARISON", markup=False, classes="result-section"),
             Static(f"original · {source_path}", markup=False, classes="editor-title"),
-            Static(original_source, markup=False, classes="source-pane"),
+            Static(numbered_source(original_source), markup=False, classes="source-pane"),
             Static("converted", markup=False, classes="editor-title"),
             Static(
-                self._converted_source or "not available",
+                numbered_source(self._converted_source)
+                if self._converted_source
+                else "not available",
                 markup=False,
                 classes="source-pane",
             ),
@@ -589,7 +612,11 @@ class ResultsScreen(VerticalScroll):
         self._mount_body(
             Static(message, markup=False, classes="result-card error"),
             Static("original source", markup=False, classes="editor-title"),
-            Static(original_source, markup=False, classes="source-pane"),
+            Static(
+                numbered_source(original_source),
+                markup=False,
+                classes="source-pane",
+            ),
         )
 
     def show_remote_file(self, result: dict[str, Any]) -> None:

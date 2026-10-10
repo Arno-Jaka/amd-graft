@@ -187,20 +187,33 @@ def actionable_dependencies(facts: TargetFacts) -> list[Dependency]:
 
 
 ProgressHook = Callable[[str, str], None]
+ResultHook = Callable[[dict[str, Any]], None]
+
+# Local installs have no TargetSpec to take a timeout from. Two minutes per
+# command matches the remote default's spirit without making a slow apt run
+# look like a hang.
+_LOCAL_TIMEOUT_S = 1800
 
 
 def install_dependencies(
     transport,
-    spec: TargetSpec,
+    spec: TargetSpec | None,
     facts: TargetFacts,
     *,
     on_progress: ProgressHook | None = None,
+    on_result: ResultHook | None = None,
 ) -> list[dict[str, Any]]:
     """Install the missing, installable dependencies and return the outcomes.
+
+    ``spec`` may be ``None`` for a local target, where the transport runs the
+    same fixed commands on this machine. ``on_progress`` fires before each
+    install and ``on_result`` after each one, so a UI can show live progress
+    rather than one silent batch at the end.
 
     Non-installable gaps are returned with ``ok`` false and their manual hint,
     so the caller can show the whole story rather than a silent no-op.
     """
+    timeout_s = spec.command_timeout_s if spec is not None else _LOCAL_TIMEOUT_S
     results: list[dict[str, Any]] = []
     for dep in scan_dependencies(facts):
         if dep.present:
@@ -208,33 +221,36 @@ def install_dependencies(
         if not dep.command:
             # Nothing we can run. Only report the gaps that matter.
             if dep.required:
-                results.append(
-                    {
-                        "key": dep.key,
-                        "label": dep.label,
-                        "ok": False,
-                        "error": dep.detail or "Install by hand.",
-                    }
-                )
+                outcome = {
+                    "key": dep.key,
+                    "label": dep.label,
+                    "ok": False,
+                    "error": dep.detail or "Install by hand.",
+                }
+                results.append(outcome)
+                if on_result is not None:
+                    on_result(outcome)
             continue
         if on_progress is not None:
             on_progress(dep.key, f"Installing {dep.label}…")
-        result = transport.run(dep.command, timeout_s=spec.command_timeout_s)
-        results.append(
-            {
-                "key": dep.key,
-                "label": dep.label,
-                "ok": result.ok,
-                "output": result.summary(800) if result.ok else "",
-                "error": "" if result.ok else result.summary(800),
-            }
-        )
+        result = transport.run(dep.command, timeout_s=timeout_s)
+        outcome = {
+            "key": dep.key,
+            "label": dep.label,
+            "ok": result.ok,
+            "output": result.summary(800) if result.ok else "",
+            "error": "" if result.ok else result.summary(800),
+        }
+        results.append(outcome)
+        if on_result is not None:
+            on_result(outcome)
     return results
 
 
 __all__ = [
     "Dependency",
     "ProgressHook",
+    "ResultHook",
     "actionable_dependencies",
     "install_dependencies",
     "missing_dependencies",

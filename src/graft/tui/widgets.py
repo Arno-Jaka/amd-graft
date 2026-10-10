@@ -1,4 +1,4 @@
-"""Terminal-cell geometry and animated target state for the workspace."""
+"""Terminal-cell geometry, live target state, and the fixed GPU dock."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from itertools import pairwise
 from typing import Any
 
 from textual import events
+from textual.app import ComposeResult
+from textual.containers import Vertical
 from textual.widgets import Static
 
 from graft.target.metrics import MetricsSnapshot
@@ -283,19 +285,54 @@ class GPUMetrics(Static):
     Every reading is optional. A field that could not be measured shows as
     "not measured" rather than a zero, so an unreadable sensor is never
     mistaken for an idle GPU.
+
+    The bar width follows the widget, because the dock narrows on smaller
+    terminals: a fixed 18-cell bar turns every line into a wrap, which reads
+    as corruption rather than as a gauge.
     """
 
     BAR_WIDTH = 18
+    # Short enough to fit the narrowest dock that still shows the panel.
+    MIN_BAR_WIDTH = 6
+    # The CSS gives this widget `padding: 0 1`, so two cells of every width
+    # measurement belong to the padding, not to the text.
+    HORIZONTAL_PADDING = 2
+    # "DISK  {bar}  100%  999.9/999.9 GB" around the bar: label 6, gaps 8,
+    # percentage 4, GB pair 14.
+    GAUGE_FIXED = 28
+    # "VRAM  100%  999/999G" — the no-bar fallback for the smallest dock.
+    COMPACT_FIXED = 13
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("markup", False)
         self._snapshot: MetricsSnapshot | None = None
         self._message = "AWAITING A TARGET FOR LIVE READINGS"
+        self._bar_width = self.BAR_WIDTH
+        self._width = 0
         super().__init__("", *args, **kwargs)
         self._render_panel()
 
+    @property
+    def _compact(self) -> bool:
+        """Too narrow for gauges: abbreviate rather than wrap every line."""
+        return 0 < self._width < self.GAUGE_FIXED + self.MIN_BAR_WIDTH + self.HORIZONTAL_PADDING
+
     def on_mount(self) -> None:
         self._render_panel()
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Give the bar whatever the widest line cannot spend on fixed text.
+        # Below the minimum the gauge format is dropped for the compact one,
+        # because a squeezed bar reads as noise, not as a reading.
+        width = event.size.width
+        available = max(0, width - self.HORIZONTAL_PADDING)
+        bar_width = max(
+            self.MIN_BAR_WIDTH, min(self.BAR_WIDTH, available - self.GAUGE_FIXED)
+        )
+        if bar_width != self._bar_width or width != self._width:
+            self._bar_width = bar_width
+            self._width = width
+            self._render_panel()
 
     def set_metrics(self, snapshot: MetricsSnapshot) -> None:
         self._snapshot = snapshot
@@ -319,17 +356,35 @@ class GPUMetrics(Static):
 
     def _usage(self, label: str, used: int, total: int) -> str:
         if used < 0 or total <= 0:
-            return f"{label}  {'not measured':<40}"
+            # The bar column is reserved whether it is drawn or not, so
+            # "not measured" lines up with the gauges above and below.
+            if self._compact:
+                return f"{label}  not measured"
+            return f"{label}  {'not measured':<{self._bar_width + 12}}"
         fraction = used / total
+        if self._compact:
+            # "40/100G" rather than "40.0/100.0 GB": the tenths buy nothing
+            # at this width and cost the line its edge.
+            return (
+                f"{label}  {fraction * 100:3.0f}%  "
+                f"{used / 1_000_000_000:.0f}/{total / 1_000_000_000:.0f}G"
+            )
         return (
-            f"{label}  {self._bar(fraction)}  {fraction * 100:3.0f}%  "
+            f"{label}  {self._bar(fraction, self._bar_width)}  "
+            f"{fraction * 100:3.0f}%  "
             f"{self._gb(used)}/{self._gb(total)} GB"
         )
 
     def _utilization(self, pct: float) -> str:
         if pct < 0:
-            return f"UTIL  {'not measured':<40}"
-        return f"UTIL  {self._bar(pct / 100)}  {pct:3.0f}%"
+            if self._compact:
+                return "UTIL  not measured"
+            return f"UTIL  {'not measured':<{self._bar_width + 12}}"
+        if self._compact:
+            return f"UTIL  {pct:3.0f}%"
+        return (
+            f"UTIL  {self._bar(pct / 100, self._bar_width)}  {pct:3.0f}%"
+        )
 
     def _render_panel(self) -> None:
         snapshot = self._snapshot
@@ -345,6 +400,13 @@ class GPUMetrics(Static):
             gauges.append(snapshot.gpu_name)
         source = "TARGET" if snapshot.source == "remote" else "LOCAL"
         footer = " · ".join(gauges) if gauges else (snapshot.error or "no gauges")
+        # A device name is the one field with no natural width limit; it is
+        # clipped rather than wrapped, because a wrapped identity line reads
+        # like two readings.
+        if self._width:
+            budget = self._width - self.HORIZONTAL_PADDING - len(source) - 4
+            if len(footer) > budget:
+                footer = footer[: max(1, budget - 1)] + "…"
         lines = [
             self._usage("VRAM", snapshot.vram_used_bytes, snapshot.vram_total_bytes),
             self._usage("DISK", snapshot.disk_used_bytes, snapshot.disk_total_bytes),
@@ -354,4 +416,18 @@ class GPUMetrics(Static):
         self.update("\n".join(lines))
 
 
-__all__ = ["GPUMetrics", "GPUStatusPanel"]
+class GPUDock(Vertical):
+    """The fixed upper-right panel: animated GPU plus live readings.
+
+    Mounted once by the app rather than per screen, so the same panel stays
+    visible on every tab. Everything that drives it (the workspace target
+    screen, the metrics thread) reaches it through the app.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("GPU / LIVE", id="gpu-dock-title")
+        yield GPUStatusPanel(id="gpu-visual")
+        yield GPUMetrics(id="gpu-metrics")
+
+
+__all__ = ["GPUDock", "GPUMetrics", "GPUStatusPanel"]

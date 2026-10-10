@@ -28,7 +28,6 @@ from graft.target import (
     TargetError,
     TransportError,
     actionable_dependencies,
-    install_dependencies,
     missing_dependencies,
     parse_form,
     run_remote,
@@ -42,6 +41,7 @@ from graft.target.metrics import (
     snapshot_from_fields,
     stream_command,
 )
+from graft.tui.screens.deps import DependencyOverlay
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.tips import classify_connection_failure
 from graft.tui.widgets import GPUMetrics, GPUStatusPanel
@@ -177,8 +177,6 @@ class TargetScreen(Vertical):
 
             with VerticalScroll(classes="card", id="target-card"):
                 yield Static("COMPUTE TARGET", classes="eyebrow")
-                yield GPUStatusPanel(id="gpu-visual")
-                yield GPUMetrics(id="gpu-metrics")
                 yield Static("Where should Graft run?", classes="card-title")
                 yield Label("GPU location", classes="field-label")
                 yield Select(
@@ -303,11 +301,16 @@ class TargetScreen(Vertical):
                     )
 
     def _gpu_panel(self) -> GPUStatusPanel | None:
-        panel = self.query(GPUStatusPanel)
+        """The app-level GPU dock panel, if the app hosts one."""
+        panel = self.app.query(GPUStatusPanel)
         return next(iter(panel), None)
 
     def _gpu_status(self, method: str, *args: Any) -> None:
-        """Drive the window-level GPU overlay if it is mounted yet."""
+        """Drive the app-level GPU dock, which is fixed on every screen."""
+        show = getattr(self.app, "show_gpu_facts", None)
+        if show is not None:
+            show(method, *args)
+            return
         panel = self._gpu_panel()
         if panel is not None:
             getattr(panel, method)(*args)
@@ -854,6 +857,18 @@ class TargetScreen(Vertical):
                 tone="success" if facts.get("gpu") else "info",
             )
             self.app.query_one("#results-view", ResultsScreen).show_local_probe(facts)
+            # A local machine is a target too: check it for the tools the
+            # pipeline needs the moment it is inspected.
+            try:
+                from graft.target.local import local_target_facts
+
+                self._show_dependency_overlay(
+                    local_target_facts(),
+                    fields=None,
+                    label="this machine",
+                )
+            except Exception:
+                pass
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
     def _remote_done(
@@ -887,24 +902,15 @@ class TargetScreen(Vertical):
                 f"Remote {mode} complete · target {state}",
                 tone="success" if result.get("ok") else "warning",
             )
-            # Alert if there are any missing dependencies after connection
-            try:
-                if mode in ("probe", "verify") and self._connected_facts:
-                    facts_obj = TargetFacts(**self._connected_facts)
-                    missing = missing_dependencies(facts_obj)
-                    actionable = actionable_dependencies(facts_obj)
-                    if missing or actionable:
-                        self.app.query_one(
-                            "#results-view", ResultsScreen
-                        ).show_missing_dependencies(
-                            "Target dependencies",
-                            actionable or missing,
-                            "Some dependencies are missing on the target. "
-                            "You can install them with 'Install missing dependencies'.",
-                        )
-                        self.app.query_one("#main-tabs", TabbedContent).active = "results"
-            except Exception:
-                pass
+            # The moment a target connects, check it for the tools the
+            # pipeline needs and say what is missing, rather than waiting
+            # for the first operation to fail on one.
+            if mode in ("probe", "verify") and self._connected_facts:
+                self._show_dependency_overlay(
+                    self._connected_facts,
+                    fields=self._connected_fields,
+                    label=str((self._connected_fields or {}).get("host") or "target"),
+                )
             results = self.app.query_one("#results-view", ResultsScreen)
             if mode == "file":
                 blocked = []
@@ -1104,83 +1110,47 @@ class TargetScreen(Vertical):
         )
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
+    def _show_dependency_overlay(
+        self,
+        facts: dict[str, Any],
+        *,
+        fields: dict[str, Any] | None,
+        label: str,
+    ) -> None:
+        """Open the dependency checklist for a target that just connected.
+
+        The overlay is advisory: it names what is missing and offers to
+        install it, but nothing runs until its button is pressed.
+        """
+        self.app.push_screen(
+            DependencyOverlay(
+                facts,
+                fields=fields,
+                label=label,
+                on_refreshed=self._dependency_facts_refreshed,
+            )
+        )
+
+    def _dependency_facts_refreshed(self, facts: dict[str, Any]) -> None:
+        """Adopt facts re-detected after an install from the overlay."""
+        if not self.is_mounted:
+            return
+        self._connected_facts = facts
+        self._gpu_status("set_target_facts", facts)
+        self._refresh_dependency_button()
+
     def _start_dependency_install(self) -> None:
         if not self._connected_fields or not self._connected_facts:
             self._show_error("Connect to a target before installing dependencies.")
             return
-        fields = dict(self._connected_fields)
-        facts = dict(self._connected_facts)
-        self._set_busy("Checking the target for missing dependencies…")
-        self.run_worker(
-            partial(self._run_dependency_install, fields, facts),
-            name="install-deps",
-            group="graft-operation",
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,
+        self._show_dependency_overlay(
+            self._connected_facts,
+            fields=self._connected_fields,
+            label=str(self._connected_fields.get("host") or "target"),
         )
 
-    def _run_dependency_install(
-        self, fields: dict[str, Any], facts: dict[str, Any]
-    ) -> None:
-        try:
-            spec = parse_form(fields)
-            if spec.kind == "ssh":
-                from graft.target.ssh import SSHTransport
-
-                transport = SSHTransport(spec)
-            else:
-                from graft.target.jupyter import JupyterTransport
-
-                transport = JupyterTransport(spec)
-            with transport:
-                results = install_dependencies(transport, spec, TargetFacts(**facts))
-                refreshed = detect(transport).as_dict()
-            self.app.call_from_thread(self._dependencies_done, results, refreshed, "")
-        except (TargetError, TransportError) as exc:
-            self.app.call_from_thread(self._dependencies_done, [], None, str(exc))
-        except Exception:
-            self.app.call_from_thread(
-                self._dependencies_done,
-                [],
-                None,
-                "Graft could not install the dependencies. Check the target "
-                "details and try again.",
-            )
-
-    def _dependencies_done(
-        self,
-        results: list[dict[str, Any]],
-        refreshed_facts: dict[str, Any] | None,
-        error: str,
-    ) -> None:
-        self.query_one("#ssh-passphrase", Input).value = ""
-        self.query_one("#jupyter-token", Input).value = ""
-        if error:
-            self._set_status(f"Dependency install failed · {error}", is_error=True)
-            self.app.query_one("#results-view", ResultsScreen).show_error(
-                "Dependency install failed", error
-            )
-        else:
-            if refreshed_facts:
-                self._connected_facts = refreshed_facts
-                self._gpu_status("set_target_facts", refreshed_facts)
-            installed = sum(1 for item in results if item.get("ok"))
-            failed = sum(1 for item in results if not item.get("ok"))
-            tone = "success" if not failed else "warning"
-            self._set_status(
-                f"Dependencies checked · {installed} installed · "
-                f"{failed} need attention",
-                tone=tone,
-            )
-            self.app.query_one("#results-view", ResultsScreen).show_dependency_install(
-                results, refreshed_facts
-            )
-        self._refresh_dependency_button()
-        self.app.query_one("#main-tabs", TabbedContent).active = "results"
-
     def _metrics_widget(self) -> GPUMetrics | None:
-        node = self.query(GPUMetrics)
+        node = self.app.query(GPUMetrics)
         return next(iter(node), None)
 
     def _on_location_changed(self, location: str) -> None:

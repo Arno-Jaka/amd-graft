@@ -12,6 +12,8 @@ The remote side can either print one snapshot (for a poll) or loop forever
 
 from __future__ import annotations
 
+import glob
+import os
 import shutil
 from dataclasses import dataclass, replace
 from typing import Any
@@ -151,22 +153,88 @@ def parse_metrics(text: str, *, source: str = "remote") -> MetricsSnapshot:
     return snapshot_from_fields(fields, source=source)
 
 
+def _read_int(path: str) -> int:
+    """Read an integer from a sysfs node, or -1 when unreadable."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def _local_sysfs_fields() -> dict[str, str]:
+    """Read local amdgpu sysfs nodes, the same nodes the remote script reads.
+
+    The remote target gets utilization, temperature, and power; a local AMD
+    workstation exposes the identical nodes under /sys, so leaving the local
+    panel at VRAM-only was a gap rather than a limit. Anything missing (an
+    NVIDIA card, a VM, macOS) yields nothing and the field stays "not
+    measured".
+    """
+    fields: dict[str, str] = {}
+    total = 0
+    used = 0
+    busy = -1
+    temp = -1
+    power = -1
+    found = False
+    for device in sorted(glob.glob("/sys/class/drm/card*/device")):
+        vram_total = _read_int(os.path.join(device, "mem_info_vram_total"))
+        if vram_total <= 0:
+            continue
+        found = True
+        total += vram_total
+        used += max(0, _read_int(os.path.join(device, "mem_info_vram_used")))
+        busy = max(busy, _read_int(os.path.join(device, "gpu_busy_percent")))
+        for hwmon in sorted(glob.glob(os.path.join(device, "hwmon", "hwmon*"))):
+            for temp_input in sorted(glob.glob(os.path.join(hwmon, "temp*_input"))):
+                temp = max(temp, _read_int(temp_input) // 1000)
+            for power_input in (
+                *sorted(glob.glob(os.path.join(hwmon, "power1_average"))),
+                *sorted(glob.glob(os.path.join(hwmon, "power1_input"))),
+            ):
+                power = max(power, _read_int(power_input) // 1_000_000)
+    if not found:
+        return fields
+    fields["vram_total_bytes"] = str(total)
+    fields["vram_used_bytes"] = str(used)
+    if busy >= 0:
+        fields["gpu_util_pct"] = str(busy)
+    if temp >= 0:
+        fields["temp_c"] = str(temp)
+    if power >= 0:
+        fields["power_w"] = str(power)
+    return fields
+
+
 def local_snapshot() -> MetricsSnapshot:
-    """Read this machine's VRAM (via torch) and root disk usage."""
+    """Read this machine's GPU sensors (torch + sysfs) and root disk usage."""
     fields: dict[str, str] = {}
     try:
         import torch
 
         if torch.cuda.is_available():
+            # torch is the authority for the GPU name, count, and the VRAM a
+            # ROCm process may actually use (reservations, other processes);
+            # sysfs below is the authority for utilization and sensors.
+            fields["gpu_name"] = str(torch.cuda.get_device_name(0))
+            fields["gpu_count"] = str(torch.cuda.device_count())
             free, total = torch.cuda.mem_get_info(0)
             fields["vram_total_bytes"] = str(int(total))
             fields["vram_used_bytes"] = str(int(total - free))
-            fields["gpu_name"] = str(torch.cuda.get_device_name(0))
-            fields["gpu_count"] = str(torch.cuda.device_count())
     except Exception:
         # A missing or unusable torch is expected on a CPU-only workstation;
-        # disk still works, so report what can be measured.
+        # disk and sysfs still work, so report what can be measured.
         pass
+    sysfs_fields = _local_sysfs_fields()
+    # sysfs reports the card's own totals. They are only used when torch could
+    # not provide a live reading, so a measured value is never replaced by a
+    # less precise one.
+    if "vram_total_bytes" not in fields:
+        fields.update({k: v for k, v in sysfs_fields.items() if k.startswith("vram_")})
+    for key, value in sysfs_fields.items():
+        if not key.startswith("vram_"):
+            fields[key] = value
     try:
         usage = shutil.disk_usage("/")
         fields["disk_total_bytes"] = str(usage.total)
@@ -177,7 +245,7 @@ def local_snapshot() -> MetricsSnapshot:
     if snapshot.vram_total_bytes < 0:
         snapshot = replace(
             snapshot,
-            error="No local GPU visible to torch",
+            error="No local AMD GPU visible to torch or /sys/class/drm",
         )
     return snapshot
 

@@ -16,7 +16,7 @@ from graft.target.dependencies import (
     scan_dependencies,
 )
 from graft.target.detect import TargetFacts
-from graft.target.local import local_capability
+from graft.target.local import LocalTransport, local_capability, local_target_facts
 from graft.target.remote import RemoteRun, run_remote, run_remote_file
 from graft.target.spec import TargetError, TargetSpec, parse_form
 from graft.target.transport import CommandResult, TransportError, clip, quote
@@ -28,6 +28,7 @@ from graft.target.transport import CommandResult, TransportError, clip, quote
 __all__ = [
     "CommandResult",
     "Dependency",
+    "LocalTransport",
     "RemoteRun",
     "TargetError",
     "TargetFacts",
@@ -37,6 +38,7 @@ __all__ = [
     "clip",
     "install_dependencies",
     "local_capability",
+    "local_target_facts",
     "missing_dependencies",
     "parse_form",
     "quote",

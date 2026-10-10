@@ -56,6 +56,17 @@ actually measured: the conversion verdict together with its evidence,
 findings grouped by severity, execution, parity, benchmarks, and the
 optional narrative.
 
+The GPU panel and its live readings are a fixed dock at the upper right,
+present on every tab rather than parked inside the workspace. It steps down
+to a narrower gauge on smaller terminals and stands aside entirely below 64
+columns, where it would cost more than it shows. Source previews and the
+original/converted comparison render with a line-number gutter, like an IDE.
+
+Highlighting text and right-clicking it opens a copy popup that puts the
+selection on the clipboard. A right-click on its own copies nothing: the
+popup has to be confirmed, because a terminal write to the clipboard can
+overwrite a password manager's buffer.
+
 The presentation rules are the same ones the report follows. A verdict never
 appears without the basis behind it, so a `.cu` file that was only read and
 never compiled reads as *"PRODUCTION READY (text analysis only)"* rather than
@@ -65,16 +76,22 @@ of rendering a zero or an empty panel.
 Under the GPU panel, live readings stream from whichever machine is selected:
 VRAM, GPU utilization, temperature, power, and disk, drawn as bars. Remote
 readings arrive over the connection already open — an SSH channel or the
-Jupyter websocket — rather than a reconnect per refresh. A sensor that cannot
-be read shows `not measured`, never a zero that reads as idle.
+Jupyter websocket — rather than a reconnect per refresh. A local AMD machine
+gets the same gauges: utilization, temperature, and power are read from the
+amdgpu sysfs nodes that the remote script reads, so a local target is not a
+second-class citizen. A sensor that cannot be read shows `not measured`,
+never a zero that reads as idle.
 
-When a target connects, Graft lists the tools the pipeline needs and marks
-what is missing. For the pieces it can install it offers the exact command, and
-installs nothing until that button is pressed, because the installs are
-system-wide and can be large. The install button appears only when a checked
-target is actually missing something. Starting a run without installing first
-stops with the missing tool named in red on the results screen, instead of
-letting a cryptic remote error through. Any results shown can be copied to the
+The moment a target connects — local probe or remote detect — an overlay
+checks it for the tools the pipeline needs and names what is missing, each
+row showing the exact install command. For the pieces Graft can install, the
+overlay's button runs them with live per-tool progress and re-detects the
+target afterwards; it installs nothing until pressed, because the installs
+are system-wide and can be large. The same overlay is reachable from the
+workspace's install button, which appears only when a checked target is
+actually missing something. Starting a run without installing first stops
+with the missing tool named in red on the results screen, instead of letting
+a cryptic remote error through. Any results shown can be copied to the
 clipboard with a single button. A connection that fails authentication — or
 that a host's fail2ban has banned — opens a short help panel with the unban
 command instead of a bare error.

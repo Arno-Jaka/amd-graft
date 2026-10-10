@@ -1181,3 +1181,115 @@ class TestMetrics:
         assert snapshot.source == "local"
         assert snapshot.disk_total_bytes == usage.total
 
+
+
+# --- local target ------------------------------------------------------------
+# A local machine is described by the same TargetFacts shape and installs
+# through the same fixed command table as a remote one, so the workspace's
+# dependency overlay has one code path rather than two.
+
+
+class TestLocalTarget:
+    def test_local_target_facts_is_targetfacts_shaped(self):
+        from graft.target.detect import TargetFacts
+        from graft.target.local import local_target_facts
+
+        facts = TargetFacts(**local_target_facts())
+        assert facts.ok is True
+        assert facts.python_path  # the running interpreter, always present
+        assert isinstance(facts.tools, dict)
+
+    def test_local_transport_runs_a_command_here(self):
+        from graft.target.local import LocalTransport
+
+        with LocalTransport() as transport:
+            result = transport.run("echo local-ok")
+        assert result.ok
+        assert "local-ok" in result.stdout
+
+    def test_a_failing_local_command_is_reported_not_raised(self):
+        from graft.target.local import LocalTransport
+
+        with LocalTransport() as transport:
+            result = transport.run("exit 3")
+        assert result.ok is False
+        assert result.returncode == 3
+
+    def test_local_stream_and_push_say_they_do_not_apply(self):
+        from graft.target.local import LocalTransport
+
+        transport = LocalTransport()
+        with pytest.raises(TransportError):
+            transport.stream("while :; do echo x; done", lambda line: None, stop=None)
+        with pytest.raises(TransportError):
+            transport.push(b"data", "/tmp/x")
+
+    def test_install_dependencies_accepts_a_local_run_with_results(self):
+        from graft.target.dependencies import install_dependencies
+        from graft.target.local import LocalTransport
+
+        facts = _deps_facts(tools={"hipcc": "/x"})  # torch missing, installable
+        commands: list[str] = []
+
+        def fake_run(command, *, cwd=None, timeout_s=None):
+            commands.append(command)
+            return CommandResult(command, 0, "installed", "")
+
+        with LocalTransport() as transport:
+            # spec=None is the local path; the command table is the same one
+            # a remote target gets, and here it is stubbed so no pip runs.
+            transport.run = fake_run
+            results = install_dependencies(transport, None, facts)
+        assert any("install torch" in command for command in commands)
+        assert all(item["ok"] for item in results)
+
+    def test_on_result_reports_each_outcome_in_order(self):
+        from graft.target.dependencies import install_dependencies
+
+        facts = _deps_facts(tools={})  # hipify-perl and hipcc missing, torch too
+        outcomes: list[str] = []
+        install_dependencies(
+            FakeTransport(),
+            parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"}),
+            facts,
+            on_result=lambda outcome: outcomes.append(outcome["key"]),
+        )
+        assert outcomes  # every reported gap reaches the callback
+        assert all(key in {"hipify-perl", "hipcc", "torch"} for key in outcomes)
+
+
+class TestLocalSysfsMetrics:
+    def test_sysfs_readings_are_parsed_from_a_fake_card(self, tmp_path, monkeypatch):
+        from graft.target import metrics as metrics_module
+
+        card = tmp_path / "card0" / "device"
+        hwmon = card / "hwmon" / "hwmon0"
+        hwmon.mkdir(parents=True)
+        (card / "mem_info_vram_total").write_text("17179869184\n")
+        (card / "mem_info_vram_used").write_text("4294967296\n")
+        (card / "gpu_busy_percent").write_text("41\n")
+        (hwmon / "temp1_input").write_text("52000\n")
+        (hwmon / "power1_average").write_text("143000000\n")
+
+        real_glob = metrics_module.glob.glob
+
+        def fake_glob(pattern: str):
+            # Point the one sysfs root the reader walks at a fake card; every
+            # other pattern is already an absolute path under tmp_path.
+            if pattern.startswith("/sys/class/drm/"):
+                return [str(card)] if pattern == "/sys/class/drm/card*/device" else []
+            return real_glob(pattern)
+
+        monkeypatch.setattr(metrics_module.glob, "glob", fake_glob)
+        fields = metrics_module._local_sysfs_fields()
+        assert fields["vram_total_bytes"] == "17179869184"
+        assert fields["vram_used_bytes"] == "4294967296"
+        assert fields["gpu_util_pct"] == "41"
+        assert fields["temp_c"] == "52"
+        assert fields["power_w"] == "143"
+
+    def test_a_machine_without_amdgpu_sysfs_reports_nothing(self, monkeypatch):
+        from graft.target import metrics as metrics_module
+
+        monkeypatch.setattr(metrics_module.glob, "glob", lambda pattern: [])
+        assert metrics_module._local_sysfs_fields() == {}

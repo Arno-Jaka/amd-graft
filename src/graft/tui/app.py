@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
+from graft.tui.screens.copy_popup import CopyPopup
 from graft.tui.screens.loading import LoadingOverlay
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.target import TargetScreen
 from graft.tui.screens.tips import TipsScreen
+from graft.tui.widgets import GPUDock
 
 
 class GraftTUI(App):
@@ -28,6 +31,153 @@ class GraftTUI(App):
     Screen {
         background: #080d15;
         color: #e5edf6;
+    }
+
+    #gpu-dock {
+        dock: right;
+        width: 48;
+        height: 100%;
+        padding: 1 1 0 1;
+        background: #0a111c;
+        border-left: round #26384d;
+    }
+
+    #gpu-dock.narrow {
+        width: 36;
+    }
+
+    #gpu-dock.tiny {
+        width: 26;
+    }
+
+    #gpu-dock.hidden {
+        display: none;
+    }
+
+    #gpu-dock.short #gpu-metrics {
+        display: none;
+    }
+
+    #gpu-dock-title {
+        width: 100%;
+        height: 1;
+        margin-bottom: 1;
+        color: #70ddc8;
+        text-style: bold;
+        text-align: center;
+    }
+
+    CopyPopup {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #copy-popup-card {
+        width: 76;
+        max-width: 92%;
+        height: auto;
+        max-height: 84%;
+        padding: 1 2;
+        border: round #83bfff;
+        background: #101a29;
+    }
+
+    #copy-popup-eyebrow {
+        color: #83bfff;
+        text-style: bold;
+    }
+
+    #copy-popup-count {
+        margin-top: 1;
+        color: #9aabbd;
+    }
+
+    #copy-popup-scroll {
+        height: auto;
+        max-height: 20;
+        margin-top: 1;
+        padding: 0 1;
+        background: #0a111c;
+        scrollbar-color: #35526a;
+        scrollbar-background: #0a111c;
+    }
+
+    #copy-popup-text {
+        color: #dbe9f4;
+    }
+
+    #copy-popup-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    DependencyOverlay {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #deps-card {
+        width: 84;
+        max-width: 96%;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round #70ddc8;
+        background: #101a29;
+    }
+
+    #deps-eyebrow {
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    #deps-title {
+        margin-top: 1;
+        color: #edf5fb;
+    }
+
+    #deps-list {
+        height: auto;
+        max-height: 20;
+        margin-top: 1;
+        scrollbar-color: #35526a;
+        scrollbar-background: #101a29;
+    }
+
+    .dep-row {
+        height: auto;
+        color: #c9d9e5;
+    }
+
+    .dep-present {
+        color: #79e5b0;
+    }
+
+    .dep-missing {
+        color: #ffb86b;
+    }
+
+    .dep-manual {
+        color: #ff9ba1;
+    }
+
+    #deps-progress {
+        height: 2;
+        margin-top: 1;
+    }
+
+    #deps-status {
+        height: auto;
+        min-height: 1;
+        margin-top: 1;
+        color: #9aabbd;
+    }
+
+    #deps-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
     }
 
     LoadingOverlay {
@@ -241,7 +391,7 @@ class GraftTUI(App):
         color: #9aabbd;
     }
 
-    #gpu-visual, #result-gpu-visual {
+    #gpu-visual {
         width: 1fr;
         min-width: 0;
         height: auto;
@@ -253,14 +403,13 @@ class GraftTUI(App):
         text-style: bold;
     }
 
-    #gpu-visual.active, #result-gpu-visual.active {
+    #gpu-visual.active {
         border: round #3b9c86;
         background: #0b1919;
         color: #70ddc8;
     }
 
-    #gpu-visual.offline, #gpu-visual.disconnected,
-    #result-gpu-visual.offline, #result-gpu-visual.disconnected {
+    #gpu-visual.offline, #gpu-visual.disconnected {
         border: round #9b4853;
         background: #1a1019;
         color: #ff8992;
@@ -732,6 +881,7 @@ class GraftTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield GPUDock(id="gpu-dock")
         with TabbedContent(initial="workspace", id="main-tabs"):
             with (
                 TabPane("Workspace", id="workspace"),
@@ -741,6 +891,65 @@ class GraftTUI(App):
             with TabPane("Results", id="results"):
                 yield ResultsScreen(id="results-view")
         yield Footer()
+
+    def on_mount(self) -> None:
+        # The dock is app-level, so its responsive classes follow the window
+        # rather than any one screen. Below 64 columns there is no room for a
+        # useful panel beside the workspace, so it steps aside entirely.
+        self._resize_gpu_dock(self.size)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._resize_gpu_dock(event.size)
+
+    def _resize_gpu_dock(self, size) -> None:
+        try:
+            dock = self.query_one("#gpu-dock")
+        except Exception:  # not composed yet
+            return
+        width, height = size.width, size.height
+        dock.set_class(width < 64, "hidden")
+        dock.set_class(64 <= width < 88, "tiny")
+        dock.set_class(88 <= width < 112, "narrow")
+        dock.set_class(height < 28, "short")
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Right-clicking highlighted text offers a copy popup.
+
+        Textual owns the highlight: dragging with the left button selects
+        text in any Static, and `Screen.get_selected_text()` returns it. The
+        selection is read on MouseDown because the Screen clears it on the
+        MouseUp that completes the right-click, so a handler on MouseUp
+        would find nothing to copy.
+        """
+        if event.button != 3:
+            return
+        selected = self.screen.get_selected_text()
+        if not selected:
+            return
+        event.stop()
+        self.push_screen(CopyPopup(selected))
+
+    def show_gpu_facts(self, method: str, *args) -> None:
+        """Drive the fixed GPU dock from any screen.
+
+        The dock lives at app level so it survives tab switches; screens
+        reach it through this method rather than reaching into the widget
+        tree, which keeps their own queries local.
+        """
+        from graft.tui.widgets import GPUMetrics, GPUStatusPanel
+
+        try:
+            if method == "set_metrics":
+                widget = next(iter(self.query(GPUMetrics)), None)
+                if widget is not None:
+                    widget.set_metrics(*args)
+                return
+            panel = next(iter(self.query(GPUStatusPanel)), None)
+            if panel is not None:
+                getattr(panel, method)(*args)
+        except Exception:
+            # A missing panel must never break the flow that reported to it.
+            pass
 
     def action_show_workspace(self) -> None:
         self.query_one(TabbedContent).active = "workspace"
