@@ -35,19 +35,21 @@ class GraftTUI(App):
 
     #gpu-dock {
         dock: right;
-        width: 48;
-        height: 100%;
-        padding: 1 1 0 1;
+        width: 56;
+        height: auto;
+        max-height: 100%;
+        margin: 1 1 0 0;
+        padding: 1 1 1 1;
         background: #0a111c;
-        border-left: round #26384d;
+        border: round #26384d;
     }
 
     #gpu-dock.narrow {
-        width: 36;
+        width: 44;
     }
 
     #gpu-dock.tiny {
-        width: 26;
+        width: 32;
     }
 
     #gpu-dock.hidden {
@@ -423,7 +425,7 @@ class GraftTUI(App):
         padding: 0 1;
         color: #8fd8c8;
         background: transparent;
-        text-align: center;
+        text-align: left;
     }
 
     Input {
