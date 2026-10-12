@@ -1307,7 +1307,6 @@ class TestLocalSysfsMetrics:
         assert token.parse_jupyter_token('"token": "disabled"') == ""
 
     def test_discover_jupyter_token_runs_script_and_returns_first_match(self):
-        from graft.target import TargetError
         from graft.target.token import TOKEN_DISCOVERY_SCRIPT, discover_jupyter_token
 
         class T:
