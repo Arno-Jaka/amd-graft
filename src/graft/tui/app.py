@@ -428,6 +428,10 @@ class GraftTUI(App):
         text-align: left;
     }
 
+    #gpu-metrics Static {
+        margin-bottom: 1;
+    }
+
     Input {
         width: 1fr;
         height: 3;

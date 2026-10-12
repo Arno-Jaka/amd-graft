@@ -166,10 +166,8 @@ class TargetScreen(Vertical):
                     yield Button("Convert & review", variant="primary", id="run-local")
                     yield Button("Check this machine", id="probe-local")
                 with Horizontal(classes="button-row", id="remote-actions"):
-                    yield Button("Detect target", id="probe-remote")
                     yield Button("Verify on GPU", variant="primary", id="verify-remote")
                     yield Button("Reconnect", id="reconnect-remote", disabled=True)
-                    yield Button("Disconnect GPU", id="disconnect-remote")
                     yield Button(
                         "Upload & run converted file",
                         id="run-converted",
@@ -316,6 +314,9 @@ class TargetScreen(Vertical):
                         "Detect only reads target capabilities. Verify uploads this project, recreates the remote workspace, compiles the HIP smoke test, and runs Graft’s bundled softmax example.",
                         classes="hint",
                     )
+                    with Horizontal(classes="button-row", id="compute-actions"):
+                        yield Button("Detect target", id="probe-remote")
+                        yield Button("Disconnect GPU", id="disconnect-remote")
 
     def _gpu_panel(self) -> GPUStatusPanel | None:
         """The app-level GPU dock panel, if the app hosts one."""
@@ -372,7 +373,7 @@ class TargetScreen(Vertical):
         for selector in ("#ssh-fields", "#jupyter-fields", "#advanced-fields"):
             self.query_one(selector, Grid).set_class(fields_compact, "compact")
         actions_stacked = width < 94
-        for selector in ("#local-actions", "#remote-actions"):
+        for selector in ("#local-actions", "#remote-actions", "#compute-actions"):
             self.query_one(selector, Horizontal).set_class(actions_stacked, "stacked")
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -412,6 +413,7 @@ class TargetScreen(Vertical):
         self.query_one("#cloud-config", Vertical).display = is_remote
         self.query_one("#local-actions", Horizontal).display = not is_remote
         self.query_one("#remote-actions", Horizontal).display = is_remote
+        self.query_one("#compute-actions", Horizontal).display = is_remote
         is_jupyter = self.query_one("#transport-select", Select).value == "jupyter"
         self.query_one("#ssh-config", Vertical).display = is_remote and not is_jupyter
         self.query_one("#jupyter-config", Vertical).display = is_remote and is_jupyter
