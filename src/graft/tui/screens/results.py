@@ -41,7 +41,7 @@ NARRATIVE_TITLES = {
     "remediation": "Suggested remediation",
 }
 
-SEVERITY_ORDER = ("blocker", "warning", "info")
+SEVERITY_ORDER = ("blocker", "review", "info")
 
 
 def _kv(label: str, value: Any) -> Static:

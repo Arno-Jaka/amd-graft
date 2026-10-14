@@ -15,6 +15,13 @@ class TestCli:
 
         assert build_parser().prog == "graft"
 
+    def test_serve_is_an_alias_for_tui(self):
+        from graft.main import COMMANDS, build_parser
+
+        assert COMMANDS["serve"] is COMMANDS["tui"]
+        assert build_parser().parse_args(["serve"]).command == "serve"
+        assert build_parser().parse_args(["tui"]).command == "tui"
+
     def test_missing_file_exits_two(self, capsys):
         from graft.main import main
 

@@ -5,12 +5,14 @@ Subcommands, deliberately thin. All behaviour lives in `pipeline` for
 decides what to print.
 
     graft migrate path/to/file.py     convert, verify, print the report
-    graft tui                         run the terminal UI
+    graft serve                       launch the terminal UI
+    graft tui                         launch the terminal UI (alias)
     graft doctor                      report what this machine can do
 
 `migrate` writes the Markdown report to stdout by default, or to a file with
 `-o`, so it composes with the rest of a shell instead of insisting on being
-interactive.
+interactive. `serve` is the headline way to start the app; `tui` is kept as
+the older spelling.
 """
 
 from __future__ import annotations
@@ -60,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the optional agent layer",
     )
 
-    sub.add_parser("tui", help="run the terminal UI")
+    sub.add_parser("serve", help="launch the terminal UI")
+    sub.add_parser("tui", help="launch the terminal UI (alias for serve)")
     sub.add_parser("doctor", help="report what this machine can do")
     return parser
 
@@ -154,17 +157,12 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_serve() -> int:
-    """The web UI was removed; keep a clear pointer for anyone who typed it."""
-    print(
-        "The web UI has been removed. Run the terminal UI instead:\n  graft tui",
-        file=sys.stderr,
-    )
-    return 2
-
-
+# `serve` and `tui` are the same command: the terminal UI is what runs on the
+# machine, so there is no separate server process to start. `serve` is the
+# name the installer and docs point at; `tui` remains a working alias.
 COMMANDS = {
     "migrate": cmd_migrate,
+    "serve": cmd_tui,
     "tui": cmd_tui,
     "doctor": cmd_doctor,
 }
@@ -172,8 +170,6 @@ COMMANDS = {
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv[:1] == ["serve"]:
-        return cmd_serve()
     args = build_parser().parse_args(argv)
     return COMMANDS[args.command](args)
 

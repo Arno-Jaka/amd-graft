@@ -93,6 +93,50 @@ def _verdict_basis(migration: MigrationResult, parity: dict | None) -> str:
     return "AST analysis only - not executed"
 
 
+def coverage_findings(migration: MigrationResult | None) -> list[dict]:
+    """Structured coverage findings for the summary and agent layers.
+
+    ``migration.coverage.findings`` is a list of human-readable strings and
+    cannot be projected field by field; ``unmapped`` is the structured form
+    the Markdown report already groups by severity, and is what consumers
+    actually want. A value missing a severity defaults to ``review`` rather
+    than being dropped, matching the report's own rule: silently hiding a
+    finding is the failure this data exists to prevent.
+    """
+    if migration is None:
+        return []
+
+    findings: list[dict] = []
+    for item in migration.coverage.unmapped or []:
+        if isinstance(item, dict):
+            symbol = item.get("symbol") or "?"
+            findings.append(
+                {
+                    "severity": str(item.get("severity") or "review"),
+                    "category": item.get("category") or "",
+                    "symbol": symbol,
+                    "line": item.get("line"),
+                    "reason": item.get("reason") or item.get("note") or "",
+                    "remediation": item.get("remediation") or "",
+                    "matched_text": item.get("matched_text") or symbol,
+                }
+            )
+        elif str(item).strip():
+            # A bare string predates the structured form; keep its text.
+            findings.append(
+                {
+                    "severity": "review",
+                    "category": "",
+                    "symbol": "?",
+                    "line": None,
+                    "reason": str(item).strip(),
+                    "remediation": "",
+                    "matched_text": "?",
+                }
+            )
+    return findings
+
+
 def _conversion_section(
     migration: MigrationResult | None, parity: dict | None = None
 ) -> list[str]:

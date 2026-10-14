@@ -27,16 +27,29 @@ Single file in. No repository ingestion.
 
 ## Install
 
+One line, no clone:
+
+    curl -fsSL https://raw.githubusercontent.com/Arno-Jaka/graft/main/install.sh | sh
+
+The script installs `uv` if it is missing, puts a checkout in `~/.graft`,
+builds its virtualenv, and links `graft` onto your PATH. Re-run it to update,
+or `sh install.sh --uninstall` to remove everything. To work from a checkout
+instead:
+
     uv sync
     uv run pytest tests -q
 
-Containerization is not set up. Run against the interpreter directly.
+A `Dockerfile` and `compose.yaml` are included; `docker build -t graft .`
+produces an image whose entrypoint is the `graft` CLI.
 
 ## Use
 
-    uv run graft doctor                        # what this machine can do
-    uv run graft migrate examples/01_torch_cuda_softmax.py
-    uv run graft tui                           # terminal UI
+    graft serve                                # launch the terminal UI
+    graft doctor                               # what this machine can do
+    graft migrate examples/01_torch_cuda_softmax.py
+
+`serve` and `tui` are the same command. From a development checkout, prefix
+each with `uv run`.
 
 `migrate` writes Markdown to stdout, or to a file with `-o`, and prints the
 same numbers the TUI shows. `--json` emits the UI's summary instead, so the
@@ -50,7 +63,7 @@ which claims are therefore unavailable.
 
 ## Terminal UI
 
-A Textual app, `graft tui`, one screen, no build step. Choose a `.py` or
+A Textual app, `graft serve` (alias `graft tui`), one screen, no build step. Choose a `.py` or
 `.cu` file, or probe a GPU target, and the panes show what the pipeline
 actually measured: the conversion verdict together with its evidence,
 findings grouped by severity, execution, parity, benchmarks, and the

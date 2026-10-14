@@ -25,19 +25,6 @@ from typing import Any
 from graft import pipeline
 from graft.report import report
 
-# Fields copied straight off the coverage Finding dataclass. Matched_text is
-# included because it is the literal source fragment a human needs to find
-# the construct, and symbol alone is often a guess.
-FINDING_FIELDS = (
-    "severity",
-    "category",
-    "symbol",
-    "line",
-    "reason",
-    "remediation",
-    "matched_text",
-)
-
 
 def _text(value: Any, fallback: str = report.NOT_MEASURED) -> str:
     """Render any value as display text without inventing a measurement."""
@@ -112,17 +99,9 @@ def _conversion(inputs) -> dict[str, Any]:
             }
             for change in migration.changes
         ],
-        "findings": [
-            {
-                "severity": str(finding.severity),
-                **{
-                    field: getattr(finding, field, None)
-                    for field in FINDING_FIELDS
-                    if field != "severity"
-                },
-            }
-            for finding in migration.coverage.findings
-        ],
+        # Read from the structured form (unmapped), not coverage.findings:
+        # that field holds human-readable strings, not Finding objects.
+        "findings": report.coverage_findings(migration),
     }
 
 

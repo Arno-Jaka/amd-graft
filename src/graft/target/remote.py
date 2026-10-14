@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from graft import config
 from graft.target.detect import TargetFacts, detect
 from graft.target.spec import TargetSpec
 from graft.target.transport import TransportError, clip, quote
@@ -33,9 +34,16 @@ MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 
 # What is left out of the uploaded tree. .git matters most: it is large, and
 # shipping a repository's history to a third-party host is not something to do
-# by default.
+# by default. Credential files matter more: the tree is uploaded to a machine
+# the operator may not own, so a root .env holding LLM_API_KEY must never ride
+# along. Matching by name (not only by directory) is what stops that.
 EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".ruff_cache", ".mypy_cache"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
+EXCLUDED_FILES = {".env", ".envrc", "id_rsa", "id_ed25519", "credentials"}
+
+
+def _is_secret_file(name: str) -> bool:
+    return name in EXCLUDED_FILES or name.startswith(".env.")
 
 # The remote script. It runs Graft's own verification tools rather than
 # reimplementing anything, so the numbers it reports come from the same code
@@ -125,6 +133,8 @@ def build_archive(root: Path) -> bytes:
             if any(part in EXCLUDED_DIRS for part in relative.parts):
                 continue
             if path.suffix in EXCLUDED_SUFFIXES:
+                continue
+            if _is_secret_file(path.name):
                 continue
             archive.add(path, arcname=str(relative))
     payload = buffer.getvalue()
@@ -250,9 +260,7 @@ def run_remote(
             error="" if facts.ok else "; ".join(facts.problems),
         )
 
-    archive = build_archive(
-        source or Path(__file__).resolve().parent.parent.parent.parent
-    )
+    archive = build_archive(source or config.PROJECT_ROOT)
     remote_archive = f"{spec.remote_dir.rsplit('/', 1)[0] or '/'}/{ARCHIVE_NAME}"
     transport.push(archive, remote_archive)
 

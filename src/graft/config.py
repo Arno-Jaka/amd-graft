@@ -10,7 +10,30 @@ import os
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-PROJECT_ROOT = PACKAGE_ROOT.parent.parent
+
+
+def _find_project_root() -> Path:
+    """Best-effort repo root for the examples and a project-level .env.
+
+    A checkout keeps the src/ layout, so the root is two levels above the
+    package and carries pyproject.toml. A wheel install has no checkout at
+    all, where ``PACKAGE_ROOT.parent.parent`` is a stdlib directory; taking
+    that path would point the examples and .env at a location outside the
+    project. Falling back to the current directory (when it looks like a
+    checkout) keeps `graft migrate examples/...` working from a source tree,
+    and the package directory otherwise, where the files simply do not exist
+    and every caller already tolerates that.
+    """
+    candidate = PACKAGE_ROOT.parent.parent
+    if (candidate / "pyproject.toml").is_file():
+        return candidate
+    cwd = Path.cwd()
+    if (cwd / "pyproject.toml").is_file():
+        return cwd
+    return PACKAGE_ROOT
+
+
+PROJECT_ROOT = _find_project_root()
 PROJECT_NAME = "Graft"
 
 EXAMPLES_DIR = PROJECT_ROOT / "examples"

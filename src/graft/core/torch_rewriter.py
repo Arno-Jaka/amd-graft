@@ -60,6 +60,9 @@ class CudaApiVisitor(ast.NodeVisitor):
 class IndexNormalizer(ast.NodeTransformer):
     def __init__(self, log: RewriteLog) -> None:
         self.log = log
+        # Set when a hardcoded index is replaced, so rewrite() knows whether
+        # the GPU_DEVICE_INDEX import has to be ensured.
+        self.used_gpu_index = False
 
     def visit_Call(self, node: ast.Call) -> ast.Call:
         self.generic_visit(node)
@@ -80,12 +83,55 @@ class IndexNormalizer(ast.NodeTransformer):
         index = node.args[1]
         if isinstance(index, ast.Constant) and index.value == 0:
             node.args[1] = ast.Name(id="GPU_DEVICE_INDEX", ctx=ast.Load())
+            self.used_gpu_index = True
             self.log.changed(
                 "torch.device('cuda', 0)",
                 node.lineno,
                 "hardcoded device index replaced with config constant",
             )
         return node
+
+
+def _ensure_gpu_index_import(tree: ast.Module) -> None:
+    """Make ``GPU_DEVICE_INDEX`` resolvable without clobbering existing names.
+
+    Done on the AST rather than by string-prepending, which had two bugs:
+    it mistook an unrelated ``from graft.config import resolve_device`` for
+    the constant already being imported, and prepending an import above a
+    ``from __future__`` statement is a syntax error. Reusing an existing
+    ``graft.config`` import and inserting after any docstring/future import
+    avoids both.
+    """
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "graft.config":
+            if any(alias.name == "GPU_DEVICE_INDEX" for alias in node.names):
+                return
+            node.names.append(ast.alias(name="GPU_DEVICE_INDEX"))
+            return
+
+    insert_at = 0
+    body = tree.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        insert_at = 1
+    while (
+        insert_at < len(body)
+        and isinstance(body[insert_at], ast.ImportFrom)
+        and body[insert_at].module == "__future__"
+    ):
+        insert_at += 1
+    body.insert(
+        insert_at,
+        ast.ImportFrom(
+            module="graft.config",
+            names=[ast.alias(name="GPU_DEVICE_INDEX")],
+            level=0,
+        ),
+    )
 
 
 def rewrite(source: str, route: Route) -> tuple[str, RewriteLog]:
@@ -99,6 +145,8 @@ def rewrite(source: str, route: Route) -> tuple[str, RewriteLog]:
 
     normalizer = IndexNormalizer(visitor.log)
     tree = normalizer.visit(tree)
+    if normalizer.used_gpu_index:
+        _ensure_gpu_index_import(tree)
     ast.fix_missing_locations(tree)
 
     return ast.unparse(tree), visitor.log

@@ -22,8 +22,11 @@ optional stage downgrades the report instead of failing the run.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import os
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -81,6 +84,56 @@ def load_module(path: Path) -> ModuleType:
         if added:
             sys.path.remove(parent)
     return module
+
+
+def _load_ported(
+    migration, path: Path, skipped: list[str]
+) -> tuple[ModuleType | None, bool]:
+    """Import the ported source so parity and benchmarks test the port.
+
+    The original file is deliberately not the thing loaded here. Parity and
+    benchmarking exist to judge the conversion, so running them against the
+    input would report a clean result while proving nothing about the output.
+
+    The ported text is written next to the original so its sibling imports
+    still resolve, imported, then removed. Only the AST (PyTorch) route
+    produces importable Python; the CUDA C++ route yields HIP source that no
+    Python interpreter can load.
+
+    Returns ``(module, produced)``. ``produced`` says whether the route
+    yielded a port at all, which is what tells the caller whether it may fall
+    back to the original. A port that exists but fails to import returns
+    ``(None, True)`` - a broken port must be reported, never masked by
+    silently verifying the input instead.
+    """
+    if migration is None or not migration.ported_source:
+        return None, False
+    if migration.backend != "ast":
+        return None, False
+
+    parent = Path(path).parent
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".graft_ported_", suffix=".py", dir=parent)
+    except OSError:
+        fd, tmp = tempfile.mkstemp(prefix=".graft_ported_", suffix=".py")
+
+    parent_str = str(parent)
+    added = parent_str not in sys.path
+    if added:
+        sys.path.insert(0, parent_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(migration.ported_source)
+        return load_module(Path(tmp)), True
+    except Exception as exc:
+        skipped.append(f"converted module not importable: {type(exc).__name__}: {exc}")
+        return None, True
+    finally:
+        if added:
+            with contextlib.suppress(ValueError):
+                sys.path.remove(parent_str)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 def _benchmark(module: ModuleType, device, skipped: list[str]) -> list[dict]:
@@ -188,18 +241,28 @@ def run(
     inputs.telemetry_snapshot = telemetry.device_snapshot()
     device = device or config.resolve_device()
 
+    # Import the original first. That import both proves the file is loadable
+    # and lets anything it prints on import be captured and forwarded, which
+    # is the stream contract the worker relies on.
     try:
-        module = load_module(path)
+        original_module = load_module(path)
     except Exception as exc:
         skipped.append(f"module not importable: {type(exc).__name__}: {exc}")
-        module = None
+        original_module = None
+
+    # Parity and benchmarks must judge the port, not the input. Prefer the
+    # ported module; fall back to the original only when the route produced
+    # no importable Python, where the original is all there is and the report
+    # already carries the "not a port" caveats.
+    ported_module, produced = _load_ported(inputs.migration, path, skipped)
+    module = ported_module if produced else original_module
 
     case_list = case_module.generate() if run_parity else []
     if run_parity and module is not None:
         inputs.parity_results = parity.check(module, case_list)
         inputs.parity = parity.summarize(inputs.parity_results)
 
-    if module is not None:
+    if original_module is not None:
         inputs.execution = runner.run_cases(inputs.migration.ported_source, case_list)
     else:
         skipped.append("execution: nothing to run")
@@ -280,15 +343,7 @@ def _review_evidence(inputs: report.ReportInputs) -> dict:
             "verdict": report._verdict_line(migration.coverage.verdict),
             "basis": report._verdict_basis(migration, inputs.parity),
             "route": migration.route.lang if migration.route else "unknown",
-            "findings": [
-                {
-                    "severity": str(finding.severity),
-                    "symbol": finding.symbol,
-                    "line": finding.line,
-                    "reason": finding.reason,
-                }
-                for finding in migration.coverage.findings
-            ],
+            "findings": report.coverage_findings(migration),
         }
 
     execution = inputs.execution

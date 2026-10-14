@@ -121,9 +121,8 @@ def convert(source: str, path: Path | None = None) -> MigrationResult:
     result.changes = log.changes
     result.coverage.findings = route.notes
 
-    if "GPU_DEVICE_INDEX" in ported and "from graft.config import" not in ported:
-        ported = "from graft.config import GPU_DEVICE_INDEX\n\n" + ported
-        result.ported_source = ported
+    # The GPU_DEVICE_INDEX import is ensured by the rewriter, on the AST,
+    # where it can see existing imports and respect __future__ placement.
 
     _apply_verdict(result)
     return result
