@@ -99,6 +99,15 @@ class Transport(Protocol):
     def push(self, local: bytes, remote_path: str) -> None:
         """Write a file to an absolute path on the remote."""
 
+    def resolve_remote_dir(self, remote_dir: str) -> str:
+        """Map a configured remote directory to an absolute path on the target.
+
+        An SSH login sees the whole filesystem and returns the path unchanged.
+        A Jupyter server serves files from one root, so the path is joined onto
+        that root; otherwise an upload and the shell that consumes it name
+        different files. Callers that may not have it fall back to the path.
+        """
+
     def probe(self) -> None:
         """Raise :class:`TransportError` unless the remote is usable."""
 

@@ -18,9 +18,8 @@ def reload(monkeypatch, **env):
     for key in (
         "LLM_MODEL",
         "LLM_BASE_URL",
-        "LLM_API_KEY_ENV",
+        "LLM_API_KEY",
         "AGENT_ENABLED",
-        "AGENT_MAX_TOOL_CALLS",
         "AGENT_TIMEOUT_S",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -39,11 +38,18 @@ def test_llm_settings_come_from_the_environment(monkeypatch):
     assert reloaded.LLM_BASE_URL == "http://h:8000/v1"
 
 
-def test_blank_endpoint_disables_the_agent_by_default(monkeypatch):
+def test_llm_settings_default_to_gemma_when_unset(monkeypatch):
     reloaded = reload(monkeypatch)
-    assert reloaded.LLM_MODEL == ""
-    assert reloaded.LLM_BASE_URL == ""
+    assert reloaded.LLM_MODEL == reloaded.DEFAULT_LLM_MODEL
+    assert reloaded.LLM_BASE_URL == reloaded.DEFAULT_LLM_BASE_URL
+    assert reloaded.LLM_API_KEY == reloaded.DEFAULT_LLM_API_KEY
+    assert "gemma" in reloaded.DEFAULT_LLM_MODEL.lower()
     assert reloaded.AGENT_ENABLED is True
+
+
+def test_api_key_can_be_overridden(monkeypatch):
+    reloaded = reload(monkeypatch, LLM_API_KEY="  personal-key  ")
+    assert reloaded.LLM_API_KEY == "personal-key"
 
 
 def test_values_are_stripped(monkeypatch):
@@ -61,8 +67,7 @@ def test_agent_enabled_is_parsed(monkeypatch, raw, expected):
 
 
 def test_numeric_settings_are_parsed(monkeypatch):
-    reloaded = reload(monkeypatch, AGENT_MAX_TOOL_CALLS="3", AGENT_TIMEOUT_S="12.5")
-    assert reloaded.AGENT_MAX_TOOL_CALLS == 3
+    reloaded = reload(monkeypatch, AGENT_TIMEOUT_S="12.5")
     assert reloaded.AGENT_TIMEOUT_S == 12.5
 
 

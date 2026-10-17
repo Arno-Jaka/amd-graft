@@ -10,6 +10,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from graft.tui.screens.copy_popup import CopyPopup
+from graft.tui.screens.instructions import InstructionsScreen
 from graft.tui.screens.loading import LoadingOverlay
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.target import TargetScreen
@@ -25,6 +26,7 @@ class GraftTUI(App):
     BINDINGS: ClassVar = [
         ("ctrl+1", "show_workspace", "Workspace"),
         ("ctrl+2", "show_results", "Results"),
+        ("ctrl+3", "show_instructions", "Instructions"),
     ]
 
     CSS = """
@@ -112,6 +114,82 @@ class GraftTUI(App):
         height: 3;
         margin-top: 1;
         layout: horizontal;
+    }
+
+    AIConversionPopup {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #ai-popup-card {
+        width: 96;
+        max-width: 96%;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round #c9a4ff;
+        background: #101a29;
+    }
+
+    #ai-popup-eyebrow {
+        color: #c9a4ff;
+        text-style: bold;
+    }
+
+    #ai-popup-title {
+        margin-top: 1;
+        color: #dbe9f4;
+    }
+
+    #ai-popup-disclaimer {
+        margin-top: 1;
+        color: #e6c07b;
+    }
+
+    #ai-popup-scroll {
+        height: auto;
+        max-height: 26;
+        margin-top: 1;
+        padding: 0 1;
+        background: #0a111c;
+        scrollbar-color: #4a3a63;
+        scrollbar-background: #0a111c;
+    }
+
+    #ai-popup-code {
+        color: #dbe9f4;
+    }
+
+    .ai-popup-section {
+        margin-top: 1;
+        color: #c9a4ff;
+        text-style: bold;
+    }
+
+    .ai-popup-comment-title {
+        margin-top: 1;
+        color: #9aabbd;
+    }
+
+    .ai-popup-comment {
+        color: #dbe9f4;
+    }
+
+    #ai-popup-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    #ai-assist-actions,
+    #ai-result-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    .ai-flag {
+        color: #c9a4ff;
     }
 
     DependencyOverlay {
@@ -890,6 +968,37 @@ class GraftTUI(App):
         border: round #355d7d;
         color: #d2e8fa;
     }
+
+    #instructions-view {
+        height: 1fr;
+        padding: 0 1;
+        scrollbar-color: #35526a;
+        scrollbar-background: #0b121d;
+    }
+
+    #instructions-title {
+        margin-top: 1;
+        color: #f2f7fb;
+        text-style: bold;
+    }
+
+    #instructions-intro {
+        margin-top: 1;
+        margin-bottom: 1;
+        color: #a5b4c5;
+    }
+
+    .instructions-section {
+        margin-top: 1;
+        color: #70ddc8;
+        text-style: bold;
+    }
+
+    .instructions-step {
+        height: auto;
+        margin-top: 1;
+        color: #c9d9e5;
+    }
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -907,6 +1016,8 @@ class GraftTUI(App):
                 yield TargetScreen(id="target-screen")
             with TabPane("Results", id="results"):
                 yield ResultsScreen(id="results-view")
+            with TabPane("Instructions", id="instructions"):
+                yield InstructionsScreen(id="instructions-view")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -973,6 +1084,9 @@ class GraftTUI(App):
 
     def action_show_results(self) -> None:
         self.query_one(TabbedContent).active = "results"
+
+    def action_show_instructions(self) -> None:
+        self.query_one(TabbedContent).active = "instructions"
 
     def show_loading(self, message: str) -> None:
         """Push or refresh the blocking overlay for a long-running action."""

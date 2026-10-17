@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import re
 import time
 from collections.abc import Callable
 from threading import Event
@@ -121,6 +122,9 @@ class JupyterTransport:
         self.base = f"{scheme}://{spec.host}:{spec.port}"
         self.ws_scheme = "wss" if scheme == "https" else "ws"
         self.session = requests.Session()
+        # The server's root directory, discovered on first use. The contents
+        # API resolves paths under it, and it is not always "/".
+        self._server_root: str | None = None
 
     # -- plumbing ---------------------------------------------------------
 
@@ -178,11 +182,59 @@ class JupyterTransport:
     def _contents_path(self, remote_path: str) -> str:
         """Map an absolute remote path to a Jupyter contents API path.
 
-        Jupyter serves its contents API relative to the server root, so an
-        absolute filesystem path is reduced to the components below that root.
+        The contents API resolves paths under the server's root directory,
+        which is not always ``/``: an image that starts Jupyter in
+        ``/shared-docker`` serves its files from there. Strip that root, then
+        reduce what is left to the components below it, so an absolute path a
+        shell command can use also names the same file to the contents API.
         """
-        parts = [part for part in remote_path.split("/") if part]
+        root = self.server_root.rstrip("/")
+        path = remote_path
+        if root and (path == root or path.startswith(root + "/")):
+            path = path[len(root) :]
+        parts = [part for part in path.split("/") if part]
         return "/api/contents" + ("/" + "/".join(parts) if parts else "")
+
+    @property
+    def server_root(self) -> str:
+        """The filesystem root the Jupyter server serves files from."""
+        if self._server_root is None:
+            self._server_root = self._discover_server_root()
+        return self._server_root
+
+    def _discover_server_root(self) -> str:
+        """Ask the server for its root directory, defaulting to ``/``.
+
+        ``jupyter server list`` prints ``<url> :: <root>``. The listing is
+        parsed here rather than only in the remote command, so a server that
+        answers without the ``sed`` in place is still understood. When the CLI
+        is unavailable the server is assumed to serve from the filesystem root,
+        which is the common case and the previous behaviour.
+        """
+        result = self.run(
+            "jupyter server list 2>/dev/null | sed -n 's/.* :: //p' | head -1",
+            timeout_s=30,
+        )
+        text = result.stdout.strip()
+        first = text.splitlines()[0].strip() if text else ""
+        if "::" in first:
+            first = first.rsplit("::", 1)[1].strip()
+        return first if first.startswith("/") else "/"
+
+    def resolve_remote_dir(self, remote_dir: str) -> str:
+        """Place a configured directory under the server root.
+
+        The terminal and the contents API share one filesystem, but only the
+        contents API is confined to the server root. Joining the configured
+        directory onto that root is what makes an upload land where a shell
+        command will later look for it.
+        """
+        root = self.server_root.rstrip("/")
+        if not root:
+            return f"/{remote_dir.lstrip('/')}"
+        if remote_dir == root or remote_dir.startswith(root + "/"):
+            return remote_dir
+        return f"{root}/{remote_dir.lstrip('/')}"
 
     def _ws_url(self, name: str) -> str:
         # Note the missing /api segment: the terminal websocket lives at the
@@ -235,11 +287,15 @@ class JupyterTransport:
 
     def _script(self, command: str, cwd: str | None) -> str:
         """The shell script that runs one command and reports its status."""
-        # stty first, so the transcript does not echo the rest of the script
-        # back into what the command printed. This line still echoes, but it
-        # lands before the opening marker and is discarded with the preamble.
+        # A Jupyter terminal is an interactive login shell: it prints a PS1
+        # prompt before every line and a PS2 continuation prompt for a
+        # multi-line block. Those prompts land inside the transcript, and
+        # between the output lines the caller parses, so a marker line no
+        # longer starts the line. Blank the prompts first (a bare assignment
+        # persists), then quiet the echo, so nothing but the command's own
+        # output sits between the markers.
         parts = [
-            "stty -echo 2>/dev/null",
+            "PS1= PS2= PROMPT_COMMAND=; stty -echo 2>/dev/null",
             f"printf '%s\\n' {BEGIN}",
         ]
         if cwd:
@@ -305,8 +361,7 @@ class JupyterTransport:
         buffer = ""
         frames = 0
         try:
-            socket_.send(json.dumps({}))
-            socket_.send(script)
+            socket_.send(_stdin_frame(script))
             while END not in buffer:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -320,7 +375,7 @@ class JupyterTransport:
                     raise TransportError(_timeout_message(self.spec, budget)) from error
                 if not frame:
                     break
-                buffer += frame
+                buffer += _decode_frame(frame)
                 frames += 1
                 if frames > MAX_FRAMES:  # pragma: no cover - backstop
                     raise TransportError("Terminal stream did not terminate.")
@@ -348,11 +403,10 @@ class JupyterTransport:
         buffer = ""
         frames = 0
         try:
-            socket_.send(json.dumps({}))
             # stty first so the loop's own source text is not echoed back; the
             # metrics parser ignores lines without a key anyway, but this keeps
             # the transcript clean. No markers: this command does not end.
-            socket_.send(f"stty -echo 2>/dev/null\n{command}\n")
+            socket_.send(_stdin_frame(f"stty -echo 2>/dev/null\n{command}\n"))
             while not stop.is_set():
                 socket_.settimeout(1.0)
                 try:
@@ -366,7 +420,7 @@ class JupyterTransport:
                         f"The live connection to {self.spec.safe_label()} "
                         "was closed by the target."
                     )
-                buffer += frame
+                buffer += _decode_frame(frame)
                 frames += 1
                 if frames > MAX_FRAMES:  # pragma: no cover - backstop
                     raise TransportError("Terminal stream did not terminate.")
@@ -448,6 +502,57 @@ class JupyterTransport:
                 "Jupyter returned an unreadable file reply."
             ) from error
         return base64.b64decode(content)
+
+
+def _stdin_frame(text: str) -> str:
+    """Wrap terminal input the way jupyter_server's websocket expects.
+
+    The terminal websocket is not a raw byte pipe: every message is a JSON
+    frame, and input is the two-element array ``["stdin", text]``. Sending the
+    script as a bare string is accepted by the socket and then quietly ignored
+    by jupyter_server 2.x, so the command never runs and the reader blocks on
+    output that will never arrive. Sending a stray ``{}`` first corrupts the
+    channel the same way.
+    """
+    return json.dumps(["stdin", text])
+
+
+# A PTY wraps output in terminal control sequences: bracketed-paste toggles,
+# the shell's window-title OSC, and cursor moves. None of it belongs in a
+# command's stdout, and left in place it stops a marker line from matching at
+# the start of the line. Covers CSI (``ESC [ … final``), OSC (``ESC ] …
+# BEL/ST``), and the two-character escapes.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+
+# Server control frames carry no terminal output. Anything else that parses as
+# JSON but is not a stdout frame is passed through untouched, so a genuinely
+# old server that sends raw text frames still works.
+_CONTROL_FRAMES = {"setup", "disconnect", "error"}
+
+
+def _decode_frame(frame: str) -> str:
+    """Reduce one websocket frame to the terminal text it carries.
+
+    jupyter_server sends JSON arrays: ``["stdout", text]`` for output and
+    ``["setup", {}]`` / ``["disconnect", n]`` around it. Concatenating the raw
+    frames leaves the JSON syntax and escapes in the middle of the output, so
+    the marker parser never sees a clean line.
+    """
+    try:
+        message = json.loads(frame)
+    except (ValueError, TypeError):
+        return frame
+    if isinstance(message, list) and len(message) == 2 and isinstance(message[0], str):
+        kind, payload = message
+        if kind == "stdout" and isinstance(payload, str):
+            return _ANSI_RE.sub("", payload)
+        if kind in _CONTROL_FRAMES:
+            return ""
+    return frame
 
 
 def _split_markers(buffer: str) -> tuple[str, int]:

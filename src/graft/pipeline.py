@@ -223,10 +223,10 @@ def run(
         run_bench: time the kernel. Requires a GPU; skipped otherwise.
         with_narrative: ask the agent layer for prose. Ignored when no
             endpoint is configured, which is the normal case.
-        ai_review: request one provider-specific review of the final output.
-            A dict with ``provider``, ``model``, and ``api_key``. Routed
-            through this composition root so no other layer imports the
-            optional agent package.
+        ai_review: request one Gemma review of the final output. A dict with
+            ``base_url``, ``model``, and ``api_key``. Routed through this
+            composition root so no other layer imports the optional agent
+            package.
 
     Returns a PipelineResult. Does not raise on a failed conversion, a
     failed parity check, or a missing agent: those are outcomes the report
@@ -310,10 +310,119 @@ def _ai_review(
         original_source,
         converted_source,
         _review_evidence(inputs),
-        provider=str(options.get("provider") or ""),
-        model_id=str(options.get("model") or ""),
-        api_key=str(options.get("api_key") or ""),
+        base_url=str(options.get("base_url") or config.LLM_BASE_URL),
+        model_id=str(options.get("model") or config.LLM_MODEL),
+        api_key=str(options.get("api_key") or config.LLM_API_KEY),
     )
+
+
+def convert_with_ai(
+    original_source: str,
+    evidence: dict,
+    options: dict,
+    *,
+    filename: str = "converted.py",
+) -> dict:
+    """Ask Gemma to finish a port the deterministic converter could not.
+
+    This is the composition entry for the AI conversion path. Like
+    ``_ai_review`` it lives in the one module permitted to import the optional
+    agent package, and it imports lazily so a missing or broken agent layer
+    degrades to ``{"available": False, ...}`` instead of breaking the caller.
+    """
+    try:
+        from graft.agent.convert import convert_with_gemma
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"The AI conversion layer is not available ({type(exc).__name__}).",
+        }
+
+    return convert_with_gemma(
+        original_source,
+        evidence,
+        base_url=str(options.get("base_url") or config.LLM_BASE_URL),
+        model_id=str(options.get("model") or config.LLM_MODEL),
+        api_key=str(options.get("api_key") or config.LLM_API_KEY),
+        filename=filename,
+    )
+
+
+def review_with_ai(
+    original_source: str,
+    converted_source: str,
+    summary: dict,
+    options: dict,
+) -> dict:
+    """Ask Gemma to review an already-measured run.
+
+    The composition entry for reusing a measured run's evidence when the run
+    itself did not call the model — for example a migration executed on a
+    remote GPU, whose evidence is summarised locally. The provider key stays on
+    this machine; only the evidence projection is sent. Like the other agent
+    entries this imports lazily and degrades to ``{"available": False, ...}``.
+    """
+    try:
+        from graft.agent.review import review_conversion
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"The AI review layer is not available ({type(exc).__name__}).",
+        }
+
+    return review_conversion(
+        original_source,
+        converted_source,
+        _review_evidence_from_summary(summary),
+        base_url=str(options.get("base_url") or config.LLM_BASE_URL),
+        model_id=str(options.get("model") or config.LLM_MODEL),
+        api_key=str(options.get("api_key") or config.LLM_API_KEY),
+    )
+
+
+def _review_evidence_from_summary(summary: dict) -> dict:
+    """Rebuild the model-facing evidence projection from a UI summary.
+
+    Mirrors :func:`_review_evidence` so a run measured in another process (a
+    remote GPU) yields the same projection the in-process path would have sent,
+    and the model can still only cite numbers that were actually measured.
+    """
+    conversion = summary.get("conversion") or {}
+    if not conversion.get("measured"):
+        conversion_evidence: dict = {
+            "verdict": report.NOT_MEASURED,
+            "basis": report.NOT_MEASURED,
+            "route": "unknown",
+            "findings": [],
+        }
+    else:
+        conversion_evidence = {
+            "verdict": conversion.get("verdict_line") or report.NOT_MEASURED,
+            "basis": conversion.get("verdict_basis") or report.NOT_MEASURED,
+            "route": conversion.get("route") or "unknown",
+            "findings": conversion.get("findings") or [],
+        }
+
+    execution = summary.get("execution") or {}
+    execution_evidence = None
+    if execution.get("measured"):
+        execution_evidence = {
+            "ok": bool(execution.get("ok")),
+            "case_count": execution.get("case_count") or 0,
+            "timed_out": bool(execution.get("timed_out")),
+            "exit_code": execution.get("exit_code"),
+            "error_type": execution.get("error_type"),
+            "error_message": execution.get("error_message"),
+        }
+
+    parity = summary.get("parity") or {}
+    return {
+        "conversion": conversion_evidence,
+        "execution": execution_evidence,
+        "parity": parity if parity.get("measured") else None,
+        "benchmarks": summary.get("benchmarks") or [],
+        "environment": summary.get("environment") or {},
+    }
 
 
 def _render_ai_review(report_text: str, review: dict) -> str:

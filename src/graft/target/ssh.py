@@ -89,6 +89,10 @@ class SSHTransport:
                 "command there. Check that the login shell is usable."
             )
 
+    def resolve_remote_dir(self, remote_dir: str) -> str:
+        """An SSH login sees the whole filesystem, so the path is unchanged."""
+        return remote_dir
+
     def _ensure_connected(self) -> paramiko.SSHClient:
         if self._client is not None:
             return self._client

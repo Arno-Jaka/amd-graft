@@ -20,6 +20,7 @@ from graft.target.metrics import MetricsSnapshot
 from graft.tui.app import GraftTUI
 from graft.tui.screens.copy_popup import CopyPopup
 from graft.tui.screens.deps import DependencyOverlay
+from graft.tui.screens.instructions import GUIDE_SECTIONS, InstructionsScreen
 from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.target import TargetScreen
 from graft.tui.screens.tips import TipsScreen, classify_connection_failure, tips_for
@@ -71,8 +72,8 @@ def test_local_results_render_an_available_ai_review():
         _summary(
             ai_review={
                 "available": True,
-                "provider": "openai",
-                "model": "gpt-4o-mini",
+                "provider": "gemma",
+                "model": "Gemma-4-31B-IT",
                 "recommendation": "engineer_review_required",
                 "summary": "Looks plausible but unverified.",
                 "comments": [
@@ -107,6 +108,226 @@ def test_local_results_render_an_unavailable_ai_review_reason():
 def test_local_results_omit_the_ai_section_when_no_review_was_requested():
     text = _render(_summary(ai_review=None))
     assert "AI REVIEW" not in text
+
+
+# --- remote verify: the full report, not a raw transcript ------------------
+
+
+def test_remote_report_renders_the_target_the_report_and_the_source_diff():
+    async def main() -> str:
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_remote_report(
+                _summary(ai_review=None),
+                "m.py",
+                "/tmp/m.py",
+                "print('original')\n",
+                facts={
+                    "gpu_name": "AMD Instinct MI300X VF",
+                    "gpu_count": 1,
+                    "rocm_version": "7.14.0",
+                    "torch_hip": "7.14.60850",
+                },
+            )
+            await pilot.pause()
+            return "\n".join(str(w.render()) for w in screen.query(Static))
+
+    text = asyncio.run(main())
+    assert "Remote migration report" in text
+    assert "REMOTE TARGET" in text
+    assert "AMD Instinct MI300X VF" in text
+    # The same report body a local run shows, including the source comparison.
+    assert "SOURCE COMPARISON" in text
+    assert "print('original')" in text
+    assert "print('converted')" in text
+
+
+def test_remote_report_includes_the_locally_generated_ai_review():
+    async def main() -> str:
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_remote_report(
+                _summary(
+                    ai_review={
+                        "available": True,
+                        "provider": "gemma",
+                        "model": "Gemma-4-31B-IT",
+                        "recommendation": "engineer_review_required",
+                        "summary": "Plausibly ported; verify at runtime.",
+                        "comments": [],
+                    }
+                ),
+                "m.py",
+                "/tmp/m.py",
+                "print('original')\n",
+                facts={"gpu_name": "MI300X"},
+            )
+            await pilot.pause()
+            return "\n".join(str(w.render()) for w in screen.query(Static))
+
+    text = asyncio.run(main())
+    assert "AI REVIEW" in text
+    assert "Plausibly ported; verify at runtime." in text
+
+
+def test_remote_verify_of_a_selected_file_shows_the_full_report():
+    """End to end through the target screen: a verify result carrying a
+    pipeline summary renders the report and source comparison, not the raw
+    step transcript."""
+
+    async def main() -> str:
+        app = GraftTUI()
+        async with app.run_test(size=(160, 60)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._verify_original_source = "print('original')\n"
+            screen._verify_source_path = "/tmp/m.py"
+            screen._remote_done(
+                {
+                    "ok": True,
+                    "filename": "m.py",
+                    "facts": _target_facts(),
+                    "summary": _summary(ai_review=None),
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            results = app.query_one("#results-view", ResultsScreen)
+            return "\n".join(str(w.render()) for w in results.query(Static))
+
+    blob = asyncio.run(main())
+    assert "Remote migration report" in blob
+    assert "SOURCE COMPARISON" in blob
+    assert "print('converted')" in blob
+
+
+
+# --- AI-assisted conversion ------------------------------------------------
+
+
+def test_results_offer_ai_conversion_when_manual_port_is_needed():
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_local(
+                _summary(
+                    conversion={
+                        "verdict": "manual_port",
+                        "verdict_line": "manual port required",
+                        "route": "cuda",
+                        "backend": "hipify",
+                        "verdict_basis": "blocker found",
+                        "changes": [],
+                        "findings": [
+                            {"severity": "blocker", "symbol": "__shfl", "reason": "no mapping"}
+                        ],
+                    }
+                ),
+                "m.py",
+                "/tmp/m.py",
+                "print('original')\n",
+            )
+            await pilot.pause()
+            text = "\n".join(str(w.render()) for w in screen.query(Static))
+            return len(screen.query("#ai-convert")), text
+
+    count, text = asyncio.run(main())
+    assert count == 1
+    assert "AI-ASSISTED PORT" in text
+
+
+def test_results_do_not_offer_ai_conversion_on_a_clean_port():
+    text = _render(
+        _summary(
+            conversion={
+                "verdict": "production_ready",
+                "verdict_line": "production ready",
+                "route": "pytorch",
+                "backend": "torch_rewriter",
+                "verdict_basis": "clean",
+                "changes": [],
+                "findings": [],
+            },
+            parity={"measured": True, "passed": 4, "total": 4, "all_passed": True},
+        )
+    )
+    assert "AI-ASSISTED PORT" not in text
+
+
+def test_ai_conversion_result_mounts_preview_and_run_buttons():
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            screen = app.query_one(ResultsScreen)
+            screen.show_local(
+                _summary(), "m.py", "/tmp/m.py", "print('original')\n",
+                ai_options={"base_url": "http://h/v1", "model": "gemma-4", "api_key": ""},
+            )
+            await pilot.pause()
+            screen._ai_conversion_done(
+                {
+                    "available": True,
+                    "provider": "gemma",
+                    "model": "gemma-4",
+                    "filename": "m_gemma.py",
+                    "summary": "Finished the port.",
+                    "code": "print('converted')\n",
+                    "comments": [
+                        {
+                            "line": 1,
+                            "severity": "review",
+                            "title": "Check stream",
+                            "comment": "Confirm the stream.",
+                        }
+                    ],
+                }
+            )
+            await pilot.pause()
+            return (
+                len(screen.query("#ai-preview")),
+                len(screen.query("#ai-run")),
+                "\n".join(str(w.render()) for w in screen.query(Static)),
+            )
+
+    preview, run, text = asyncio.run(main())
+    assert preview == 1
+    assert run == 1
+    assert "AI version ready" in text
+
+
+def test_ai_popup_renders_the_code_and_the_models_notes():
+    from graft.tui.screens.ai_popup import AIConversionPopup
+
+    async def main():
+        app = _Host()
+        async with app.run_test() as pilot:
+            app.push_screen(
+                AIConversionPopup(
+                    "m_gemma.py",
+                    "print('hello')\n",
+                    [
+                        {
+                            "line": 1,
+                            "severity": "review",
+                            "title": "Check stream",
+                            "comment": "Confirm the stream matches.",
+                        }
+                    ],
+                )
+            )
+            await pilot.pause()
+            popup = app.screen
+            return "\n".join(str(w.render()) for w in popup.query(Static))
+
+    text = asyncio.run(main())
+    assert "AI-CONVERTED VERSION" in text
+    assert "print('hello')" in text
+    assert "Check stream" in text
+    assert "generated by a language model" in text
 
 
 # --- connection tips --------------------------------------------------------
@@ -458,6 +679,40 @@ def test_a_python_run_that_failed_on_missing_torch_shows_the_red_block():
     assert active == "results"
     assert "Missing dependencies" in blob
     assert "PyTorch" in blob
+
+
+def test_a_successful_remote_verification_does_not_label_its_steps_failed():
+    """The remote script reports exit codes, not an "ok" flag.
+
+    Reading only an "ok" key made every step of a passed verification show as
+    "failed", which is how a green run came back as "verify_hip: failed".
+    """
+
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._remote_done(
+                {
+                    "ok": True,
+                    "facts": _target_facts(),
+                    "steps": {
+                        "verify_hip": {"returncode": 0, "output": "HIP VERIFICATION PASSED"},
+                        "pipeline": {"returncode": 0, "output": "{}"},
+                    },
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            results = app.query_one("#results-view", ResultsScreen)
+            return "\n".join(str(widget.render()) for widget in results.query(Static))
+
+    blob = asyncio.run(main())
+    assert "verify_hip: ok" in blob
+    assert "pipeline: ok" in blob
+    assert "failed" not in blob
 
 
 def test_losing_the_live_stream_marks_the_target_disconnected():
@@ -1195,3 +1450,44 @@ def test_the_source_comparison_panes_are_numbered_too():
     assert "1 │ print('original')" in blob
     # The converted pane is numbered as well, not left as raw text.
     assert "1 │ print('converted')" in blob
+
+
+def test_the_instructions_tab_shows_the_workflow_in_order():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            await pilot.pause()
+            tabs = app.query_one("#main-tabs")
+            app.action_show_instructions()
+            await pilot.pause()
+            screen = app.query_one(InstructionsScreen)
+            blob = "\n".join(str(widget.render()) for widget in screen.query(Static))
+            return tabs.active, blob
+
+    active, blob = asyncio.run(main())
+    assert active == "instructions"
+    # The steps name the actual controls a user presses.
+    assert "Convert & review" in blob
+    assert "Verify on GPU" in blob
+    assert "Upload & run converted file" in blob
+    assert "Results tab" in blob
+
+
+def test_the_guide_names_the_buttons_it_tells_you_to_press():
+    """The wording must stay honest when the buttons change.
+
+    A guide that points at a renamed control is worse than no guide, so the
+    controls that carry the workflow are checked against what the workspace
+    actually renders.
+    """
+    steps = "\n".join(step for _, items in GUIDE_SECTIONS for step in items)
+    for label in (
+        "Convert & review",
+        "Detect target",
+        "Detect token",
+        "Verify on GPU",
+        "Upload & run converted file",
+        "Install missing dependencies",
+        "Save converted file",
+    ):
+        assert label in steps, label

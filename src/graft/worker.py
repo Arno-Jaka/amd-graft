@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
                     target,
                     run_parity=run_parity,
                     run_bench=run_bench,
-                    # The explicit provider choice owns this run's one model
+                    # The explicit Gemma choice owns this run's one model
                     # call; avoid also invoking an unrelated environment model.
                     with_narrative=with_narrative and review_options is None,
                     # The review runs inside the pipeline so this worker never
@@ -159,10 +159,6 @@ def main(argv: list[str] | None = None) -> int:
                     ai_review=review_options,
                 )
                 summary = summary_module.summarize(result)
-                migration = result.inputs.migration
-                summary["converted_source"] = (
-                    migration.ported_source if migration else ""
-                )
                 summary["ai_review"] = result.ai_review
         except Exception as exc:
             _fail(

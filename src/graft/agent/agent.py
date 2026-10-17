@@ -1,16 +1,20 @@
-"""Stage 8 — The Agno agent.
+"""Stage 8 — The Gemma narration agent.
 
 Handles the long tail that deterministic conversion misses: explanation,
 narrative, suggested mappings, proposed extra test cases. Removing this
 directory must leave a fully working product. That is the layering test,
 and `is_available()` is what enforces it.
 
+The model is Google Gemma, reached through AMD's OpenAI-compatible endpoint
+(see ``gemma.py``). There is no agent framework in the loop: one configured
+model, one system guardrail, one user prompt per call.
+
 Four rules hold throughout this module.
 
 1. The agent never decides correctness. It is handed measured results and
    narrates them. Every number it can emit comes from verify/, bench/, or
-   coverage/, all of which it reaches through read-only tools.
-2. It never runs user code. runner.py is not exposed as a tool, so the
+   coverage/; it is given those as text and cannot recompute them.
+2. It never runs user code. runner.py is not reachable from here, so the
    model cannot ask the harness to execute anything.
 3. Absence is a normal state, not an error. No endpoint configured means
    the narrative sections render as "not available" and the report still
@@ -19,18 +23,15 @@ Four rules hold throughout this module.
    a string saying so. It never propagates into the report as a traceback,
    because a report that fails to render is worse than one with no prose.
 
-Every function here is synchronous and importable without agno or a
-network, so tests can exercise the degradation paths directly.
+Every function here is synchronous and importable without a network, so
+tests can exercise the degradation paths directly.
 """
 
 from __future__ import annotations
 
-import os
-
 from graft import config
 
 from . import prompts
-from .tools import build_tools
 
 NOT_AVAILABLE = "not available"
 
@@ -69,17 +70,17 @@ def unavailable_reason() -> str:
     return ""
 
 
-# Set when the vLLM backend cannot even be constructed, so the failure can
+# Set when the Gemma client cannot even be constructed, so the failure can
 # be explained instead of surfacing as an empty section.
 _model_error: str | None = None
 
 
 def build_model():
-    """Construct the Agno model, or None if it cannot be built.
+    """Construct the Gemma client, or None if it cannot be built.
 
-    vLLM is the target: an OpenAI-compatible server on the AMD instance,
-    which is what makes a self-hosted demo possible without an API key.
-    The request timeout is set on the model, so a hung server fails as a
+    Gemma is served from an OpenAI-compatible endpoint, so a single client
+    covers the default AMD token factory and any self-hosted replacement.
+    The request timeout is set on the client, so a hung endpoint fails as a
     timeout rather than stalling the pipeline indefinitely.
     """
     global _model_error
@@ -89,27 +90,39 @@ def build_model():
         return None
 
     try:
-        from agno.models.vllm import VLLM
-    except ImportError as exc:
-        _model_error = f"vLLM backend unavailable: {exc}"
+        from .gemma import GemmaModel
+    except Exception as exc:  # pragma: no cover - gemma.py is stdlib-only
+        _model_error = f"gemma client unavailable: {exc}"
         return None
 
-    api_key = (
-        os.environ.get(config.LLM_API_KEY_ENV, "").strip()
-        or config.LLM_PLACEHOLDER_API_KEY
-    )
-    return VLLM(
-        id=config.LLM_MODEL,
+    return GemmaModel(
         base_url=config.LLM_BASE_URL,
-        api_key=api_key,
+        model=config.LLM_MODEL,
+        api_key=config.LLM_API_KEY,
         timeout=config.AGENT_TIMEOUT_S,
     )
 
 
-def build_agent():
-    """Construct the agent, or None when it cannot be constructed."""
-    global _model_error
+class _Response:
+    """The subset of a model response the narrative layer reads."""
 
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.text = content
+
+
+class _Narrator:
+    """One system guardrail plus one user prompt, sent to the model once."""
+
+    def __init__(self, model) -> None:
+        self.model = model
+
+    def run(self, prompt: str) -> _Response:
+        return _Response(self.model.complete(GUARDRAIL, prompt))
+
+
+def build_agent():
+    """Construct the narrator, or None when it cannot be constructed."""
     if not config.AGENT_ENABLED:
         return None
 
@@ -117,21 +130,7 @@ def build_agent():
     if model is None:
         return None
 
-    try:
-        from agno.agent import Agent
-    except ImportError as exc:
-        _model_error = f"agno.agent unavailable: {exc}"
-        return None
-
-    return Agent(
-        model=model,
-        name="graft-narrator",
-        instructions=GUARDRAIL,
-        tools=build_tools(config.AGENT_MAX_TOOL_CALLS),
-        markdown=False,
-        telemetry=False,
-        retries=2,
-    )
+    return _Narrator(model)
 
 
 def is_available() -> bool:
@@ -145,10 +144,6 @@ def is_available() -> bool:
     endpoint that is set, so the answer matches reality.
     """
     if not endpoint_configured():
-        return False
-    try:
-        import agno  # noqa: F401
-    except ImportError:
         return False
     return build_model() is not None
 

@@ -94,6 +94,7 @@ def local_target_facts() -> dict[str, Any]:
     tools = {name: path for name in _TOOLS if (path := _find_tool(name))}
     torch_version = ""
     torch_gpu = ""
+    torch_hip = ""
     gpu_count = 0
     gpu_name = ""
     vram_mb = 0
@@ -101,6 +102,7 @@ def local_target_facts() -> dict[str, Any]:
         import torch
 
         torch_version = torch.__version__
+        torch_hip = getattr(torch.version, "hip", "") or ""
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
             gpu_name = str(torch.cuda.get_device_name(0))
@@ -123,6 +125,7 @@ def local_target_facts() -> dict[str, Any]:
         "tools": tools,
         "torch_version": torch_version,
         "torch_gpu": torch_gpu,
+        "torch_hip": torch_hip,
         "python_path": sys.executable or "",
     }
 
@@ -145,6 +148,10 @@ class LocalTransport:
 
     def probe(self) -> None:
         """This machine is by definition reachable."""
+
+    def resolve_remote_dir(self, remote_dir: str) -> str:
+        """The local machine has no separate root, so the path is unchanged."""
+        return remote_dir
 
     def run(
         self,

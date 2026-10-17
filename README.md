@@ -162,21 +162,33 @@ migration in the copy. The copy is forced onto its own `src` path first,
 because otherwise the subprocess imports the original checkout through the
 editable install and the deletion silently never happens.
 
-The agent never decides correctness. It receives measured results through
-six read-only tools and narrates them; it cannot execute user code, and its
-output is rendered under a heading that says a language model wrote it.
-With no endpoint configured the section reads "no narrative generated" and
-every measured section is unaffected. Prose the agent could not obtain is
-never printed under a heading claiming a model wrote it.
+The agent never decides correctness. It receives measured results and
+read-only context (`agent/tools.py`) and narrates them; it cannot execute
+user code, and its output is rendered under a heading that says a language
+model wrote it. With no endpoint configured the section reads "no narrative
+generated" and every measured section is unaffected. Prose the agent could
+not obtain is never printed under a heading claiming a model wrote it.
 
 `pipeline.run()` is the single entry point: convert, execute, verify,
 benchmark, narrate, render. Every stage is skippable and every skip is
 recorded in the report rather than silently dropped.
 
-Set `LLM_MODEL` and `LLM_BASE_URL` to enable the agent. Values come from
-the environment or from a `.env` file at the project root; see
-`.env.example`. vLLM on the AMD instance is the intended target, which
-makes a self-hosted demo possible without an API key.
+The model is Google Gemma, reached through AMD's OpenAI-compatible Radeon
+"token factory" endpoint (`POST {base}/chat/completions`) by a stdlib-only
+client in `agent/gemma.py` — no provider SDK is required, and the `agent/`
+layer stays removable. `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` come
+from the environment or a `.env` at the project root (see `.env.example`);
+all three ship with defaults so the AI report works out of the box. The TUI
+lets you override the endpoint, model, and key per run without saving the
+key.
+
+When a migration needs manual work — a blocker, a failing parity case, or a
+verdict below production ready — the TUI offers to finish the port with
+Gemma. That produces a separate AI-converted file with inline `GRAFT-AI`
+comments, previewable in a popup and runnable on a remote GPU. The
+deterministic verdict is unchanged by it, and the run step re-runs the full
+pipeline on the AI file so parity and benchmarks are measured by Graft, not
+claimed by the model.
 
 Converted code is executed in a separate process under a wall-clock
 timeout. That is process containment, not a security sandbox: there is no
@@ -198,7 +210,7 @@ Deterministic stages are done and tested on CPU:
 | Coverage scoring | `core/coverage.py` | done, blocker/review/info severities |
 | Report | `report/report.py` | done |
 | Pipeline | `pipeline.py` | done, single entry point |
-| Explanation layer | `agent/` | done, optional, needs an LLM endpoint |
+| Explanation layer | `agent/` | done, optional, Google Gemma |
 | Terminal UI | `tui/` | done, Textual |
 | Upload containment | `worker.py` | done, disposable child per migration |
 | CLI | `main.py` | done, `migrate` / `tui` / `doctor` |

@@ -48,26 +48,47 @@ class Dependency:
         }
 
 
+def _is_debian_like(facts: TargetFacts) -> bool:
+    return any(name in facts.os_name.lower() for name in _DEBIAN_LIKE)
+
+
+# A bare cloud image often ships python3 without pip, so the ROCm wheel install
+# would fail with "No module named pip" before it ever reached PyTorch. On
+# apt-based targets the command installs python3-pip first, then runs pip3.
+_APT_INSTALL = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y"
+
+
+def _rocm_series(version: str) -> str:
+    """Return the "X.Y" series from a ROCm/torch HIP version, or ""."""
+    parts = (version or "").split(".")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{parts[0]}.{parts[1]}"
+    return ""
+
+
 def _torch_command(facts: TargetFacts) -> tuple[str, str]:
     """Return (command, detail) for installing PyTorch that can see the GPU.
 
-    The ROCm wheel index is named after the ROCm series, so it is derived from
-    the reported version. When that version cannot be mapped to a known index
-    the plain PyPI wheel is used, which is honest about being CUDA-or-CPU; the
-    detail says so rather than pretending it is the right build.
+    The ROCm wheel index is named after the ROCm series. PyTorch's own HIP
+    version is the best source: a host can carry more than one ROCm stack, and
+    the wheel that will work is the one matching the PyTorch the GPU already
+    runs on. Only when that is unavailable does the detected ROCm version get
+    used. pip is not guaranteed to exist on a fresh image, so on apt-based
+    targets the command installs ``python3-pip`` first. When no series can be
+    mapped the plain PyPI wheel is used, which is honest about being
+    CUDA-or-CPU; the detail says so rather than pretending it is the right
+    build.
     """
     python = quote(facts.python_path or "python3")
-    version = facts.rocm_version or ""
-    parts = version.split(".")
-    # Prefer known ROCm series if version looks like X.Y or X.Y.Z
-    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-        rocm_series = f"{parts[0]}.{parts[1]}"
+    rocm_series = _rocm_series(facts.torch_hip) or _rocm_series(facts.rocm_version)
+    if rocm_series:
         index = f"https://download.pytorch.org/whl/rocm{rocm_series}"
-        return (
-            f"{python} -m pip install --upgrade pip && "
-            f"{python} -m pip install torch --index-url {quote(index)}",
-            f"PyTorch from the ROCm {rocm_series} wheel index.",
-        )
+        wheels = f"torch torchvision --index-url {quote(index)}"
+        if _is_debian_like(facts):
+            command = f"{_APT_INSTALL} python3-pip && pip3 install {wheels}"
+        else:
+            command = f"{python} -m pip install {wheels}"
+        return command, f"PyTorch from the ROCm {rocm_series} wheel index."
     # Keep behavior consistent with tests: when unknown, fall back to PyPI
     return (
         f"{python} -m pip install --upgrade pip && "
@@ -79,10 +100,9 @@ def _torch_command(facts: TargetFacts) -> tuple[str, str]:
 
 def _rocm_tool_command(facts: TargetFacts, package: str) -> tuple[str, str]:
     """Return (command, detail) for an apt-based ROCm tool install."""
-    if any(name in facts.os_name.lower() for name in _DEBIAN_LIKE):
+    if _is_debian_like(facts):
         return (
-            "apt-get update && DEBIAN_FRONTEND=noninteractive "
-            f"apt-get install -y {package}",
+            f"{_APT_INSTALL} {package}",
             f"Installed with apt ({package}).",
         )
     return (

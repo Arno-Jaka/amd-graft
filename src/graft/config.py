@@ -71,32 +71,29 @@ def _flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# LLM endpoint, typically vLLM on the AMD instance. Blank values mean the
-# agent layer is disabled, which must leave the product fully working; see
-# agent/agent.py for why that is the required behaviour rather than a
-# convenience. Read from the environment so a deployed instance can be
-# configured without editing code.
-LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").strip()
+# The agent layer speaks to Google Gemma through AMD's Radeon "token factory"
+# endpoint, which is OpenAI-compatible (POST {base}/chat/completions). Every
+# value is read from the environment so a deployment can override it (or point
+# at a self-hosted model) without editing code.
+#
+# A default endpoint, model, and shared demo key ship so the AI report and the
+# "convert with Gemma" action work out of the box. The key is a shared, rate-
+# limited token, not a personal credential: override LLM_API_KEY, or type a
+# different key in the TUI, to bill your own quota.
+DEFAULT_LLM_BASE_URL = "https://developer.amd.com.cn/radeon/api/v1"
+DEFAULT_LLM_MODEL = "Gemma-4-31B-IT"
+DEFAULT_LLM_API_KEY = (
+    "rc-e17e881e334a6452fd23c84f72dadc6d5a86ec8a68d9af3e"
+)
 
-# Name of the variable holding the API key, not the key itself. A local
-# vLLM server usually runs without auth, so this is often unset entirely.
-# Set LLM_API_KEY_ENV=VLLM_API_KEY for that convention.
-LLM_API_KEY_ENV = os.environ.get("LLM_API_KEY_ENV", "LLM_API_KEY").strip()
-
-# Placeholder key for a local vLLM server, which usually runs without auth.
-# Agno raises rather than defaulting, so one is supplied here. This is not
-# a credential and grants nothing.
-LLM_PLACEHOLDER_API_KEY = "local"
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip() or DEFAULT_LLM_MODEL
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_LLM_BASE_URL
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "").strip() or DEFAULT_LLM_API_KEY
 
 AGENT_ENABLED = _flag("AGENT_ENABLED", True)
 
-# Agno has no tool-call cap of its own, so the limit is enforced at the
-# tool boundary instead. See agent/tools.py.
-AGENT_MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "8"))
-
-# Seconds allowed for one model call. Enforced on the model object rather
-# than around agent.run(), so a hung server cannot stall the pipeline.
+# Seconds allowed for one model call. Enforced on the HTTP request itself, so
+# a hung endpoint cannot stall the pipeline behind a socket that never closes.
 AGENT_TIMEOUT_S = float(os.environ.get("AGENT_TIMEOUT_S", "60"))
 
 SUBPROCESS_TIMEOUT_S = 120

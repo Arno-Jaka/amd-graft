@@ -8,6 +8,8 @@ changes a verdict.
 
 from __future__ import annotations
 
+import contextlib
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,10 @@ from graft.target.dependencies import scan_dependencies
 from graft.target.detect import TargetFacts
 
 NOT_MEASURED = "not measured"
+
+# A verdict below production ready means the mechanical pass left work for a
+# human. That is exactly when the "convert with Gemma" action is offered.
+NEEDS_MANUAL_PORT = {"needs_review", "manual_port", "unsupported"}
 
 
 def numbered_source(source: str) -> str:
@@ -168,11 +174,34 @@ def _dependency_lines(facts: Any) -> list[str]:
     return lines
 
 
+def _step_status(step: Any) -> str:
+    """Render a remote step as ok/failed.
+
+    The remote scripts report a step with a ``returncode`` and its output; some
+    paths also carry an explicit ``ok``. Reading only ``ok`` marked every
+    successful remote step as failed, because the key was never there.
+    """
+    if not isinstance(step, dict):
+        return "failed"
+    if "ok" in step:
+        return "ok" if step.get("ok") else "failed"
+    if "returncode" in step:
+        return "ok" if step.get("returncode") == 0 else "failed"
+    return "failed"
+
+
 class ResultsScreen(VerticalScroll):
     """Display the evidence returned by local and remote operations."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._converted_source = ""
+        # State for the optional AI-conversion path. Kept on the screen so the
+        # buttons can act on the same source the report describes.
+        self._original_source = ""
+        self._source_filename = "converted.py"
+        self._ai_options: dict[str, str] = {}
+        self._ai_result: dict[str, Any] | None = None
+        self._ai_converting = False
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
@@ -193,6 +222,12 @@ class ResultsScreen(VerticalScroll):
             self._save_converted()
         elif event.button.id == "copy-results":
             self._copy_results()
+        elif event.button.id == "ai-convert":
+            self._start_ai_conversion()
+        elif event.button.id == "ai-preview":
+            self._preview_ai()
+        elif event.button.id == "ai-run":
+            self._run_ai_on_gpu()
 
     def _copy_results(self) -> None:
         text = self._copyable_text()
@@ -265,6 +300,8 @@ class ResultsScreen(VerticalScroll):
 
     def _reset(self) -> None:
         self._converted_source = ""
+        self._ai_result = None
+        self._ai_converting = False
         self.query_one("#save-row").display = False
         self.query_one("#result-tools").display = False
         self.query_one("#output-path", Input).value = ""
@@ -323,6 +360,55 @@ class ResultsScreen(VerticalScroll):
         filename: str,
         source_path: str,
         original_source: str,
+        ai_options: dict[str, str] | None = None,
+    ) -> None:
+        self._render_report(
+            summary,
+            filename,
+            source_path,
+            original_source,
+            ai_options=ai_options,
+            heading=f"Migration report · {filename}",
+        )
+
+    def show_remote_report(
+        self,
+        summary: dict[str, Any],
+        filename: str,
+        source_path: str,
+        original_source: str,
+        ai_options: dict[str, str] | None = None,
+        facts: dict[str, Any] | None = None,
+        note: str = "",
+    ) -> None:
+        """The full report for a migration measured on a remote GPU.
+
+        Same body as a local run — conversion, execution, parity, benchmarks,
+        the AI review, and the original-vs-converted source comparison — with a
+        short block naming the remote target the numbers came from.
+        """
+        self._render_report(
+            summary,
+            filename,
+            source_path,
+            original_source,
+            ai_options=ai_options,
+            heading=f"Remote migration report · {filename}",
+            facts=facts,
+            note=note,
+        )
+
+    def _render_report(
+        self,
+        summary: dict[str, Any],
+        filename: str,
+        source_path: str,
+        original_source: str,
+        ai_options: dict[str, str] | None = None,
+        *,
+        heading: str,
+        facts: dict[str, Any] | None = None,
+        note: str = "",
     ) -> None:
         self._reset()
         conversion = summary.get("conversion") or {}
@@ -335,6 +421,9 @@ class ResultsScreen(VerticalScroll):
         findings = conversion.get("findings") or []
         changes = conversion.get("changes") or []
         self._converted_source = str(summary.get("converted_source") or "")
+        self._original_source = original_source or ""
+        self._source_filename = filename or "converted.py"
+        self._ai_options = dict(ai_options or {})
 
         verdict = str(conversion.get("verdict") or "").lower()
         blockers = sum(
@@ -353,7 +442,7 @@ class ResultsScreen(VerticalScroll):
         else:
             tone = "warning"
 
-        self._set_heading(f"Migration report · {filename}", tone)
+        self._set_heading(heading, tone)
         self._set_summary(conversion.get("verdict_line") or "conversion complete", tone)
         self.query_one("#save-row").display = bool(self._converted_source)
 
@@ -375,6 +464,31 @@ class ResultsScreen(VerticalScroll):
             markup=False,
             classes="result-card",
         )
+
+        remote_widgets: list[Any] = []
+        if isinstance(facts, dict) and facts:
+            remote_lines = []
+            for key in ("gpu_name", "gpu_count", "rocm_version", "torch_hip"):
+                if facts.get(key) not in (None, ""):
+                    remote_lines.append(f"{key}: {facts[key]}")
+            for key, value in (facts.get("tools") or {}).items():
+                remote_lines.append(f"{key}: {'present' if value else 'missing'}")
+            notes = facts.get("notes")
+            if isinstance(notes, list) and notes:
+                remote_lines.extend(f"note: {note}" for note in notes)
+            elif notes:
+                remote_lines.append(str(notes))
+            if remote_lines:
+                remote_widgets = [
+                    Static("REMOTE TARGET", markup=False, classes="result-section"),
+                    Static(
+                        "\n".join(remote_lines), markup=False, classes="result-card"
+                    ),
+                ]
+        if note:
+            remote_widgets.append(
+                Static(note, markup=False, classes="result-card")
+            )
 
         details = [
             Static("CONVERSION", markup=False, classes="result-section"),
@@ -546,8 +660,22 @@ class ResultsScreen(VerticalScroll):
             )
             ai_section.extend(_ai_review_rows(ai_review))
 
+        # An AI conversion is offered only when the mechanical pass left work
+        # for a human: a blocker, a failing parity case, or a verdict below
+        # production ready. On a clean port it would be noise.
+        needs_manual = (
+            blockers > 0
+            or parity_failed
+            or verdict in NEEDS_MANUAL_PORT
+        )
+        self._ai_result = None
+        ai_assist: list[Any] = []
+        if needs_manual:
+            ai_assist = self._ai_assist_widgets()
+
         self._mount_body(
             tiles,
+            *remote_widgets,
             *details,
             Static("ENVIRONMENT", markup=False, classes="result-section"),
             environment_rows,
@@ -562,6 +690,7 @@ class ResultsScreen(VerticalScroll):
             ),
             *narrative_widgets,
             *ai_section,
+            *ai_assist,
             Static("SOURCE COMPARISON", markup=False, classes="result-section"),
             Static(f"original · {source_path}", markup=False, classes="editor-title"),
             Static(numbered_source(original_source), markup=False, classes="source-pane"),
@@ -574,6 +703,183 @@ class ResultsScreen(VerticalScroll):
                 classes="source-pane",
             ),
         )
+
+    # ------------------------------------------------------------------
+    # optional AI conversion
+    # ------------------------------------------------------------------
+    def _ai_assist_widgets(self) -> list[Any]:
+        """The labelled block that offers to finish the port with Gemma."""
+        model = self._ai_options.get("model") or "the configured Gemma model"
+        widgets: list[Any] = [
+            Static("AI-ASSISTED PORT (model, optional)", markup=False, classes="result-section"),
+            Static(
+                "The mechanical port left work for a human. You can ask Google "
+                f"Gemma ({model}) to produce a complete file that finishes it. "
+                "The AI file is kept separate from the measured results above — "
+                "the verdict does not change, and the AI version is not evidence "
+                "until you run it on a GPU and Graft verifies it.",
+                markup=False,
+                classes="result-card",
+            ),
+            Horizontal(
+                Button("Convert with Google Gemma", id="ai-convert"),
+                id="ai-assist-actions",
+            ),
+        ]
+        return widgets
+
+    def _start_ai_conversion(self) -> None:
+        if self._ai_converting:
+            return
+        if not self._original_source.strip():
+            self.notify("There is no source to convert.", severity="warning")
+            return
+        self._ai_converting = True
+        with contextlib.suppress(Exception):
+            button = self.query_one("#ai-convert", Button)
+            button.label = "Asking Gemma…"
+            button.disabled = True
+        self.run_worker(
+            partial(self._run_ai_conversion, self._original_source, self._source_filename),
+            name="ai-conversion",
+            group="graft-operation",
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _run_ai_conversion(self, original_source: str, filename: str) -> None:
+        from graft import pipeline
+
+        evidence: dict[str, Any] = {
+            "filename": filename,
+            "options": self._ai_options,
+        }
+        try:
+            # Route through the composition root, never graft.agent from the UI.
+            result = pipeline.convert_with_ai(
+                original_source,
+                evidence,
+                self._ai_options,
+                filename=filename,
+            )
+        except Exception as exc:  # defensive: worker thread must not crash the app
+            result = {
+                "available": False,
+                "reason": f"AI conversion failed ({type(exc).__name__}).",
+            }
+        self.app.call_from_thread(self._ai_conversion_done, result)
+
+    def _ai_conversion_done(self, result: dict[str, Any]) -> None:
+        self._ai_converting = False
+        self._ai_result = result
+        with contextlib.suppress(Exception):
+            button = self.query_one("#ai-convert", Button)
+            button.disabled = False
+            button.label = "Convert with Google Gemma"
+        if not result.get("available"):
+            reason = result.get("reason") or "The AI conversion did not complete."
+            self.notify(str(reason), severity="warning", timeout=8)
+            return
+        code = str(result.get("code") or "")
+        self.notify(
+            f"Gemma returned {result.get('filename') or 'a converted file'} "
+            f"({len(code.splitlines())} lines). Review it before running.",
+            timeout=8,
+        )
+        self._show_ai_result()
+
+    def _show_ai_result(self) -> None:
+        """Render the AI result controls beneath the offer block."""
+        if not self._ai_result or not self._ai_result.get("available"):
+            return
+        result = self._ai_result
+        code = str(result.get("code") or "")
+        widgets: list[Any] = [
+            Static(
+                f"AI version ready · {result.get('filename')} · "
+                f"{len(code.splitlines())} line(s)",
+                markup=False,
+                classes="result-card ai-flag",
+            ),
+            Static(str(result.get("summary") or ""), markup=False, classes="result-card"),
+        ]
+        comments = result.get("comments") or []
+        if comments:
+            widgets.append(
+                Static("AI CHANGE NOTES", markup=False, classes="result-section")
+            )
+            for comment in comments[:12]:
+                line = comment.get("line")
+                where = f"line {line}" if line else "general"
+                severity = str(comment.get("severity", "review")).upper()
+                widgets.append(
+                    Static(
+                        f"{severity} · {where} · {comment.get('title', 'Change')}",
+                        markup=False,
+                        classes="result-kv",
+                    )
+                )
+                if comment.get("comment"):
+                    widgets.append(
+                        Static(str(comment["comment"]), markup=False, classes="result-card")
+                    )
+        widgets.append(
+            Static(
+                "AI output can be wrong. Preview it, then upload and run it on a "
+                "GPU: Graft re-runs the deterministic pipeline on the AI file and "
+                "reports parity and benchmarks separately.",
+                markup=False,
+                classes="result-kv",
+            )
+        )
+        widgets.append(
+            Horizontal(
+                Button("Preview AI version", id="ai-preview"),
+                Button(
+                    "Upload & run AI version on GPU",
+                    id="ai-run",
+                    variant="primary",
+                ),
+                id="ai-result-actions",
+            )
+        )
+        body = self._body()
+        with contextlib.suppress(Exception):
+            body.mount(*widgets)
+
+    def _preview_ai(self) -> None:
+        if not self._ai_result or not self._ai_result.get("available"):
+            return
+        from graft.tui.screens.ai_popup import AIConversionPopup
+
+        self.app.push_screen(
+            AIConversionPopup(
+                str(self._ai_result.get("filename") or "converted_gemma.py"),
+                str(self._ai_result.get("code") or ""),
+                list(self._ai_result.get("comments") or []),
+            )
+        )
+
+    def _run_ai_on_gpu(self) -> None:
+        if not self._ai_result or not self._ai_result.get("available"):
+            return
+        code = str(self._ai_result.get("code") or "")
+        filename = str(self._ai_result.get("filename") or "converted_gemma.py")
+        if not code.strip():
+            self.notify("The AI version is empty.", severity="warning")
+            return
+        try:
+            target = self.app.query_one("#target-screen")
+        except Exception:
+            self.notify("Open the Target tab to set the GPU connection first.", severity="warning")
+            return
+        start = getattr(target, "start_ai_remote_file", None)
+        if start is None:
+            self.notify("This build cannot run the AI version remotely.", severity="warning")
+            return
+        self.notify(f"Uploading {filename} to the GPU target…")
+        start(filename, code)
 
     def show_local_probe(self, facts: dict[str, Any]) -> None:
         self._reset()
@@ -625,6 +931,84 @@ class ResultsScreen(VerticalScroll):
         self._set_heading("Converted file run on GPU", "success" if ok else "error")
         self._mount_body(self._remote_body(result))
 
+    def show_remote_ai_file(self, result: dict[str, Any]) -> None:
+        """Show the outcome of running + verifying an AI file on the GPU.
+
+        This is the payoff of the AI path: not the model's word, but the
+        deterministic pipeline run against the AI file on real AMD hardware.
+        """
+        self._reset()
+        ok = bool(result.get("ok"))
+        self._set_heading(
+            "AI version run & verified on GPU", "success" if ok else "error"
+        )
+        lines: list[str] = []
+        filename = result.get("filename")
+        if filename:
+            lines.append(f"file: {filename}")
+        facts = result.get("facts")
+        if isinstance(facts, dict):
+            for key in ("gpu_name", "gpu_count", "rocm_version", "backend"):
+                if facts.get(key) is not None:
+                    lines.append(f"{key}: {facts[key]}")
+
+        verification = result.get("verification")
+        if isinstance(verification, dict) and verification:
+            conversion = verification.get("conversion") or {}
+            parity = verification.get("parity") or {}
+            lines.append("")
+            lines.append("deterministic verification of the AI file:")
+            lines.append(f"  verdict : {conversion.get('verdict') or 'not measured'}")
+            if parity.get("measured"):
+                lines.append(
+                    f"  parity  : {parity.get('passed', 0)}/{parity.get('total', 0)}"
+                )
+            else:
+                lines.append("  parity  : not measured")
+            for key in ("route", "backend"):
+                if conversion.get(key):
+                    lines.append(f"  {key}: {conversion[key]}")
+        else:
+            lines.append("")
+            lines.append("deterministic verification did not return a result.")
+
+        steps = result.get("steps")
+        if isinstance(steps, dict):
+            lines.append("")
+            lines.append("steps:")
+            for name, step in steps.items():
+                if isinstance(step, dict):
+                    status = _step_status(step)
+                    lines.append(f"  {name}: {status}")
+                else:
+                    lines.append(f"  {name}: {step}")
+
+        execution = result.get("execution_output")
+        if execution:
+            lines.append("")
+            lines.append("run output:")
+            lines.append(str(execution))
+
+        error = result.get("error")
+        if error:
+            lines.append("")
+            lines.append(f"error: {error}")
+
+        report_text = result.get("report_text")
+        if report_text:
+            lines.append("")
+            lines.append("report:")
+            lines.append(str(report_text))
+
+        lines.append("")
+        lines.append(
+            "The AI model wrote the candidate file; compilation, execution, "
+            "parity, and benchmarks above were measured by Graft on the target."
+        )
+        self._mount_body(
+            Static("\n".join(lines) or "No details returned.", markup=False, classes="result-card")
+        )
+
     def show_remote(self, result: dict[str, Any], mode: str, note: str = "") -> None:
         self._reset()
         ok = bool(result.get("ok"))
@@ -667,7 +1051,7 @@ class ResultsScreen(VerticalScroll):
             lines.append("steps:")
             for name, step in steps.items():
                 if isinstance(step, dict):
-                    status = "ok" if step.get("ok") else "failed"
+                    status = _step_status(step)
                     lines.append(f"  {name}: {status}")
                 else:
                     lines.append(f"  {name}: {step}")

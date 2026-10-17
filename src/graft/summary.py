@@ -58,6 +58,9 @@ def summarize(result: pipeline.PipelineResult) -> dict[str, Any]:
         "parity": _parity(inputs.parity),
         "benchmarks": _benchmarks(inputs.benchmarks),
         "narrative": _narrative(inputs.narratives),
+        # The ported source itself, so a UI can show the original next to the
+        # conversion. Empty (not missing) when the pipeline skipped migration.
+        "converted_source": _converted_source(inputs),
     }
 
 
@@ -72,6 +75,13 @@ def _environment(snapshot: dict | None) -> dict[str, Any]:
         "total_vram_mb": total_vram,
         "peak_vram_mb": peak_vram,
     }
+
+
+def _converted_source(inputs) -> str:
+    migration = inputs.migration
+    if migration is None:
+        return ""
+    return str(migration.ported_source or "")
 
 
 def _conversion(inputs) -> dict[str, Any]:

@@ -90,7 +90,67 @@ run_step() {
 }
 
 run_step verify_hip python3 tools/verify_hip.py
-run_step pipeline python3 -m graft.main migrate examples/01_torch_cuda_softmax.py --json --no-narrative
+run_step pipeline python3 -m graft.main migrate __PIPELINE_FILE__ --json --no-narrative
+printf '}}\n'
+exit $status
+"""
+
+
+# Remote script for running and verifying a Gemma-produced file. Graft is
+# uploaded first, so the verification runs against the same deterministic
+# pipeline a local run uses. Execution and verification are reported as
+# separate steps so a failure names which one broke.
+AI_REMOTE_SCRIPT = r"""
+set -o pipefail
+cd __REMOTE_DIR__ || exit 2
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+
+status=0
+printf '%s\n' __MARKER__
+if [ ! -f src/graft/__init__.py ]; then
+  printf '{"error":"project did not arrive intact"}\n'
+  exit 3
+fi
+
+sdk_lib="$(__PYTHON__ -c 'import pathlib,site;print(next(iter(pathlib.Path(site.getsitepackages()[0]).glob("_rocm_sdk_core/lib")),""))' 2>/dev/null)"
+if [ -n "$sdk_lib" ]; then
+  for so in "$sdk_lib"/*.so.*; do
+    [ -e "$so" ] || continue
+    base="$(basename "$so")"
+    ln -sf "$so" "$sdk_lib/${base%%.so.*}.so" 2>/dev/null
+  done
+  LD_LIBRARY_PATH="$sdk_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
+
+AI_FILE=__AI_FILE__
+AI_SUFFIX=__AI_SUFFIX__
+AI_DIR=__AI_DIR__
+
+printf '{"steps":{'
+first=1
+run_step() {
+  name="$1"; shift
+  if [ $first -eq 0 ]; then printf ','; fi
+  first=0
+  out="$("$@" 2>&1)"
+  rc=$?
+  printf '"%s":{"returncode":%d,"output":%s}' \
+    "$name" "$rc" "$(printf '%s' "$out" | __PYTHON__ -c 'import json,sys;print(json.dumps(sys.stdin.read()))')"
+}
+
+if [ "$AI_SUFFIX" = "cu" ]; then
+  if command -v hipcc >/dev/null 2>&1; then
+    run_step compile hipcc -O2 "$AI_FILE" -o "$AI_DIR/graft-ai-bin"
+    run_step run "$AI_DIR/graft-ai-bin"
+  else
+    run_step compile sh -c "echo 'hipcc is not available on this target'; exit 127"
+  fi
+else
+  run_step run __PYTHON__ "$AI_FILE"
+fi
+run_step verification __PYTHON__ -m graft.main migrate "$AI_FILE" --json --no-narrative
+run_step report __PYTHON__ -m graft.main migrate "$AI_FILE" --no-narrative
 printf '}}\n'
 exit $status
 """
@@ -108,6 +168,15 @@ class RemoteRun:
     steps: dict[str, Any] = field(default_factory=dict)
     ok: bool = False
     error: str = ""
+    filename: str = ""
+    # Whether the HIP toolchain self-check passed. For a selected-file verify
+    # this is informational, not a gate: a valid Python/ROCm target need not
+    # have a C++ compiler.
+    verified: bool = False
+    # The pipeline's own JSON summary, when the verify run migrated a source
+    # file. This is the same projection the local UI renders, so the remote
+    # report can reuse it (source comparison included) without a second run.
+    summary: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +187,9 @@ class RemoteRun:
             "steps": self.steps,
             "ok": self.ok,
             "error": self.error,
+            "filename": self.filename,
+            "verified": self.verified,
+            "summary": self.summary,
         }
 
 
@@ -228,12 +300,25 @@ def _extract_json(stdout: str) -> dict[str, Any] | None:
 _VERIFY_PASS = re.compile(r"HIP VERIFICATION PASSED")
 
 
+def _resolve_dir(transport, remote_dir: str) -> str:
+    """Where a configured remote directory actually lives on the target.
+
+    SSH sees the whole filesystem, but a Jupyter server serves files from one
+    root, so a path that a shell command can use has to be joined onto that
+    root before it also means the same file to the contents API. Transports
+    that have no such notion leave the path alone.
+    """
+    resolver = getattr(transport, "resolve_remote_dir", None)
+    return resolver(remote_dir) if resolver is not None else remote_dir
+
+
 def run_remote(
     transport,
     spec: TargetSpec,
     *,
     source: Path | None = None,
     probe_only: bool = False,
+    run_file: tuple[str, str] | None = None,
 ) -> RemoteRun:
     """Detect the target, push Graft to it, and run the verification suite.
 
@@ -241,6 +326,10 @@ def run_remote(
     package root. It is deliberately not ``spec.remote_dir``: that path only
     exists on the far side, so naming one parameter after the other invites
     packing whatever happens to sit at that path locally.
+
+    ``run_file`` is an optional ``(filename, contents)`` pair to migrate on the
+    target instead of the bundled example, which is what the UI's "verify on
+    GPU" action uses so the report describes the operator's own source.
 
     ``probe_only`` stops after detection, which is what the UI's connect
     button uses so the operator can see what was found before anything is
@@ -261,12 +350,13 @@ def run_remote(
         )
 
     archive = build_archive(source or config.PROJECT_ROOT)
-    remote_archive = f"{spec.remote_dir.rsplit('/', 1)[0] or '/'}/{ARCHIVE_NAME}"
+    remote_dir = _resolve_dir(transport, spec.remote_dir)
+    remote_archive = f"{remote_dir.rsplit('/', 1)[0] or '/'}/{ARCHIVE_NAME}"
     transport.push(archive, remote_archive)
 
     unpack = transport.run(
-        f"rm -rf {quote(spec.remote_dir)} && mkdir -p {quote(spec.remote_dir)} "
-        f"&& tar xzf {quote(remote_archive)} -C {quote(spec.remote_dir)}",
+        f"rm -rf {quote(remote_dir)} && mkdir -p {quote(remote_dir)} "
+        f"&& tar xzf {quote(remote_archive)} -C {quote(remote_dir)}",
         timeout_s=spec.command_timeout_s,
     )
     if not unpack.ok:
@@ -280,8 +370,40 @@ def run_remote(
             error=f"The project uploaded but would not unpack. {_unpack_hint(unpack, spec)}",
         )
 
-    script = REMOTE_SCRIPT.replace("__REMOTE_DIR__", quote(spec.remote_dir)).replace(
-        "__MARKER__", RESULT_MARKER
+    # Default to Graft's own example so a plain "verify" still exercises the
+    # full toolchain. A selected file is placed beside the tree and migrated
+    # instead, so the evidence describes the operator's source.
+    pipeline_file = "examples/01_torch_cuda_softmax.py"
+    filename = ""
+    if run_file is not None:
+        filename, contents = run_file
+        name = Path(filename).name
+        if Path(name).suffix.lower() not in {".py", ".cu"}:
+            raise ValueError("Only .py and .cu source files can run on the target.")
+        if not contents.strip():
+            raise ValueError("The source file is empty; there is nothing to verify.")
+        filename = name
+        selected_dir = f"{remote_dir}/graft-selected"
+        mkdir = transport.run(
+            f"mkdir -p {quote(selected_dir)}", timeout_s=spec.command_timeout_s
+        )
+        if not mkdir.ok:
+            return RemoteRun(
+                spec_label=label,
+                facts=facts,
+                started_at=started,
+                duration_s=time.monotonic() - started,
+                pushed_bytes=len(archive),
+                ok=False,
+                error=f"Could not prepare a directory for the source file. {mkdir.summary()}",
+            )
+        pipeline_file = f"{selected_dir}/{name}"
+        transport.push(contents.encode("utf-8"), pipeline_file)
+
+    script = (
+        REMOTE_SCRIPT.replace("__REMOTE_DIR__", quote(remote_dir))
+        .replace("__MARKER__", RESULT_MARKER)
+        .replace("__PIPELINE_FILE__", quote(pipeline_file))
     )
     result = transport.run(script, timeout_s=spec.command_timeout_s)
 
@@ -296,6 +418,7 @@ def run_remote(
             started_at=started,
             duration_s=time.monotonic() - started,
             pushed_bytes=len(archive),
+            filename=filename,
             steps={
                 "remote_script": {
                     "returncode": result.returncode,
@@ -312,6 +435,7 @@ def run_remote(
             started_at=started,
             duration_s=time.monotonic() - started,
             pushed_bytes=len(archive),
+            filename=filename,
             ok=False,
             error=str(payload["error"]),
         )
@@ -320,12 +444,30 @@ def run_remote(
     verify_output = (steps.get("verify_hip") or {}).get("output", "")
     verified = bool(_VERIFY_PASS.search(verify_output))
 
+    # The pipeline step prints the same JSON summary the local UI renders.
+    # Reuse it so a remote verify can show the report and the source diff
+    # without re-running anything on this machine.
+    summary = _parse_json_text((steps.get("pipeline") or {}).get("output", ""))
+    pipeline_rc = int((steps.get("pipeline") or {}).get("returncode", 1))
+
     problems = list(facts.problems)
-    if not verified:
-        problems.append(
-            "The ported HIP did not verify on the target. See the verify step "
-            "output for the failing check."
-        )
+    if run_file is not None:
+        # The operator's own file is the measurement that matters. The HIP
+        # toolchain self-check is informational here, not a gate, because a
+        # valid Python/ROCm target need not have a C++ compiler.
+        if summary is None or pipeline_rc != 0:
+            problems.append(
+                "The migration did not complete on the target. See the pipeline "
+                "step output for the failure."
+            )
+        ok = summary is not None and pipeline_rc == 0 and not problems
+    else:
+        if not verified:
+            problems.append(
+                "The ported HIP did not verify on the target. See the verify "
+                "step output for the failing check."
+            )
+        ok = verified and not problems
 
     return RemoteRun(
         spec_label=label,
@@ -334,8 +476,11 @@ def run_remote(
         duration_s=time.monotonic() - started,
         pushed_bytes=len(archive),
         steps=steps,
-        ok=verified and not problems,
+        ok=ok,
         error="; ".join(problems),
+        filename=filename,
+        verified=verified,
+        summary=summary,
     )
 
 
@@ -376,7 +521,9 @@ def run_remote_file(
             "duration_s": round(time.monotonic() - started, 2),
         }
 
-    run_dir = f"{spec.remote_dir}/graft-runs/{uuid.uuid4().hex}"
+    run_dir = (
+        f"{_resolve_dir(transport, spec.remote_dir)}/graft-runs/{uuid.uuid4().hex}"
+    )
     mkdir = transport.run(
         f"mkdir -p {quote(run_dir)}", timeout_s=spec.command_timeout_s
     )
@@ -497,3 +644,174 @@ def run_remote_file(
         else f"The converted Python script exited {run_result.returncode}.",
         "duration_s": round(time.monotonic() - started, 2),
     }
+
+
+def run_remote_ai_file(
+    transport,
+    spec: TargetSpec,
+    filename: str,
+    source: str,
+) -> dict[str, Any]:
+    """Run and verify a Gemma-produced file on the detected AMD target.
+
+    Unlike :func:`run_remote_file`, this also uploads Graft itself and runs the
+    deterministic pipeline against the AI file on the target, so the returned
+    evidence (parity, benchmarks, report) comes from the same code path a local
+    run uses rather than from the model's own claims. Execution and
+    verification are reported separately.
+    """
+    started = time.monotonic()
+    label = spec.safe_label()
+    name = Path(filename).name
+    suffix = Path(name).suffix.lower().lstrip(".")
+    if suffix not in {"py", "cu"}:
+        raise ValueError("Only .py and .cu converted files can run on the target.")
+    if not source.strip():
+        raise ValueError("The AI-converted file is empty; there is nothing to upload.")
+
+    facts = detect(transport)
+    common = {
+        "spec_label": label,
+        "facts": facts.as_dict(),
+        "filename": name,
+        "ai_converted": True,
+    }
+    if not facts.gpu_count:
+        return {
+            **common,
+            "ok": False,
+            "stage": "gpu_detection",
+            "error": (
+                "No AMD GPU is visible on the target. The AI-converted file was "
+                "not uploaded or run."
+            ),
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    archive = build_archive(config.PROJECT_ROOT)
+    remote_dir = _resolve_dir(transport, spec.remote_dir)
+    remote_archive = f"{remote_dir.rsplit('/', 1)[0] or '/'}/{ARCHIVE_NAME}"
+    transport.push(archive, remote_archive)
+    unpack = transport.run(
+        f"rm -rf {quote(remote_dir)} && mkdir -p {quote(remote_dir)} "
+        f"&& tar xzf {quote(remote_archive)} -C {quote(remote_dir)}",
+        timeout_s=spec.command_timeout_s,
+    )
+    if not unpack.ok:
+        return {
+            **common,
+            "ok": False,
+            "stage": "prepare",
+            "error": f"Graft uploaded but would not unpack. {_unpack_hint(unpack, spec)}",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    run_dir = f"{remote_dir}/graft-ai-runs/{uuid.uuid4().hex}"
+    mkdir = transport.run(
+        f"mkdir -p {quote(run_dir)}", timeout_s=spec.command_timeout_s
+    )
+    if not mkdir.ok:
+        return {
+            **common,
+            "ok": False,
+            "stage": "prepare",
+            "error": f"Could not prepare a run directory on the target. {mkdir.summary()}",
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    remote_file = f"{run_dir}/{name}"
+    transport.push(source.encode("utf-8"), remote_file)
+    uploaded_bytes = len(source.encode("utf-8"))
+
+    python_path = facts.python_path or "python3"
+    script = (
+        AI_REMOTE_SCRIPT.replace("__REMOTE_DIR__", quote(remote_dir))
+        .replace("__MARKER__", RESULT_MARKER)
+        .replace("__PYTHON__", quote(python_path))
+        .replace("__AI_FILE__", quote(remote_file))
+        .replace("__AI_SUFFIX__", suffix)
+        .replace("__AI_DIR__", quote(run_dir))
+    )
+    result = transport.run(script, timeout_s=spec.command_timeout_s)
+
+    payload = _extract_json(result.stdout) or {}
+    if not payload:
+        return {
+            **common,
+            "ok": False,
+            "stage": "run",
+            "uploaded_bytes": uploaded_bytes,
+            "remote_path": remote_file,
+            "steps": {
+                "remote_script": {
+                    "returncode": result.returncode,
+                    "output": result.summary(),
+                }
+            },
+            "error": _script_failure_hint(result),
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+    if payload.get("error"):
+        return {
+            **common,
+            "ok": False,
+            "stage": "run",
+            "uploaded_bytes": uploaded_bytes,
+            "remote_path": remote_file,
+            "error": str(payload["error"]),
+            "duration_s": round(time.monotonic() - started, 2),
+        }
+
+    steps = payload.get("steps", {})
+    run_step = steps.get("run") or {}
+    verify_step = steps.get("verification") or {}
+    report_step = steps.get("report") or {}
+
+    verification = _parse_json_text(verify_step.get("output", ""))
+    report_text = str(report_step.get("output", "")).strip()
+    execution_output = str(run_step.get("output", "")).strip()
+
+    run_ok = bool(run_step) and int(run_step.get("returncode", 1)) == 0
+    verified = verify_step.get("returncode") == 0 and bool(verification)
+
+    problems = list(facts.problems)
+    if not run_ok:
+        problems.append(
+            "The AI-converted file did not run cleanly on the target; see the "
+            "run step output."
+        )
+    if not verified:
+        problems.append(
+            "The deterministic pipeline could not verify the AI-converted file "
+            "on the target; see the verification step output."
+        )
+
+    return {
+        **common,
+        "ok": run_ok and verified and not problems,
+        "stage": "complete" if run_ok else "execute",
+        "uploaded_bytes": uploaded_bytes,
+        "remote_path": remote_file,
+        "steps": steps,
+        "verification": verification,
+        "report_text": report_text,
+        "execution_output": execution_output,
+        "exit_code": run_step.get("returncode"),
+        "error": "; ".join(problems),
+        "duration_s": round(time.monotonic() - started, 2),
+    }
+
+
+def _parse_json_text(text: Any) -> dict[str, Any] | None:
+    """Parse a JSON object the remote printed, tolerating leading noise."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    candidate = text.strip()
+    start = candidate.find("{")
+    if start == -1:
+        return None
+    try:
+        parsed = json.loads(candidate[start:])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None

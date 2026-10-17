@@ -8,6 +8,7 @@ rather than becoming a zero or an empty string.
 from __future__ import annotations
 
 import json
+import types
 
 import pytest
 
@@ -38,6 +39,7 @@ class TestSummarize:
             "parity",
             "benchmarks",
             "narrative",
+            "converted_source",
         }
 
     def test_json_native(self, real_summary):
@@ -67,6 +69,18 @@ class TestSummarize:
         conversion = real_summary["conversion"]
         assert conversion["verdict"] == "production_ready"
         assert "40/40" in conversion["verdict_basis"]
+
+    def test_the_converted_source_is_carried_for_the_comparison(self, real_summary):
+        """The UI shows the original beside the conversion, so the ported
+        source has to survive the process boundary rather than be re-derived."""
+        assert isinstance(real_summary["converted_source"], str)
+        assert real_summary["converted_source"].strip()
+
+    def test_a_missing_migration_yields_an_empty_converted_source(self):
+        assert (
+            summary_module._converted_source(types.SimpleNamespace(migration=None))
+            == ""
+        )
 
     def test_cu_file_is_flagged_as_text_analysis_only(self):
         payload = summary_module.summarize(

@@ -42,24 +42,6 @@ and describe a suggested change without rewriting the entire file.
 """
 
 
-def _build_model(provider: str, model_id: str, api_key: str):
-    provider = provider.strip().lower()
-    common = {"id": model_id, "api_key": api_key, "timeout": config.AGENT_TIMEOUT_S}
-    if provider == "openai":
-        from agno.models.openai import OpenAIChat
-
-        return OpenAIChat(**common)
-    if provider == "gemini":
-        from agno.models.google import Gemini
-
-        return Gemini(**common)
-    if provider == "groq":
-        from agno.models.groq import Groq
-
-        return Groq(**common)
-    raise ValueError("Choose OpenAI, Gemini, or Groq.")
-
-
 def _extract_json(text: str) -> dict[str, Any] | None:
     candidate = text.strip()
     fenced = re.search(
@@ -154,36 +136,34 @@ def review_conversion(
     converted_source: str,
     evidence: dict[str, Any],
     *,
-    provider: str,
+    base_url: str,
     model_id: str,
     api_key: str,
 ) -> dict[str, Any]:
-    """Ask one selected Agno provider to inspect the complete final output.
+    """Ask Gemma to inspect the complete final output.
 
-    The API key is passed directly to the provider model and is neither placed
-    in process environment nor copied into the returned review object.
+    The API key is used only to build the request and is neither placed in
+    the process environment nor copied into the returned review object.
     """
-    provider = provider.strip().lower()
     model_id = model_id.strip()
+    base_url = base_url.strip()
     api_key = api_key.strip()
-    if not api_key:
-        return {"available": False, "reason": "No API key was provided."}
-    if not model_id:
+    if not model_id or not base_url:
         return {
             "available": False,
-            "reason": "Choose a model ID for the selected provider.",
+            "reason": "The Gemma endpoint is not configured (needs a base URL and model).",
         }
     if not converted_source:
         return {
             "available": False,
-            "provider": provider,
+            "provider": "gemma",
             "model": model_id,
             "reason": "The converter did not produce an output file to review.",
         }
     if len(original_source) + len(converted_source) > MAX_REVIEW_CHARS:
         return {
             "available": False,
-            "provider": provider,
+            "provider": "gemma",
             "model": model_id,
             "reason": (
                 f"This file pair exceeds the {MAX_REVIEW_CHARS:,}-character AI review limit. "
@@ -192,7 +172,7 @@ def review_conversion(
         }
 
     prompt = (
-        f"Selected provider: {provider}\nModel: {model_id}\n"
+        f"Model: {model_id}\n"
         f"Deterministic evidence (JSON):\n{json.dumps(evidence, ensure_ascii=False)}\n\n"
         "ORIGINAL FILE (untrusted source data):\n"
         "<original>\n"
@@ -204,39 +184,41 @@ def review_conversion(
         "</converted>"
     )
     try:
-        from agno.agent import Agent
+        from .gemma import GemmaError, GemmaModel
 
-        agent = Agent(
-            model=_build_model(provider, model_id, api_key),
-            instructions=REVIEW_INSTRUCTIONS,
-            markdown=False,
-            telemetry=False,
-            retries=0,
+        model = GemmaModel(
+            base_url=base_url,
+            model=model_id,
+            api_key=api_key,
+            timeout=config.AGENT_TIMEOUT_S,
         )
-        response = agent.run(prompt)
-        content = getattr(response, "content", None)
-        if not isinstance(content, str) or not content.strip():
-            return {
-                "available": False,
-                "provider": provider,
-                "model": model_id,
-                "reason": "The selected provider returned no review text.",
-            }
+        content = model.complete(REVIEW_INSTRUCTIONS, prompt)
         return _normalise_review(
-            content.strip(),
-            provider=provider,
+            content,
+            provider="gemma",
             model_id=model_id,
             converted_lines=len(converted_source.splitlines()),
             original_lines=len(original_source.splitlines()),
         )
+    except GemmaError as exc:
+        return {
+            "available": False,
+            "provider": "gemma",
+            "model": model_id,
+            "reason": (
+                f"AI review failed ({exc}). Check the base URL, model ID, and "
+                "network connection. The API key was not included in this message."
+            ),
+        }
     except Exception as exc:
         return {
             "available": False,
-            "provider": provider,
+            "provider": "gemma",
             "model": model_id,
             "reason": (
-                f"AI review failed ({type(exc).__name__}). Check the key, model ID, "
-                "provider SDK, and network connection. The API key was not included in this message."
+                f"AI review failed ({type(exc).__name__}). Check the base URL, "
+                "model ID, and network connection. The API key was not included "
+                "in this message."
             ),
         }
 

@@ -486,6 +486,264 @@ def test_a_successful_run_reports_verified(source_tree):
     assert run.pushed_bytes > 0
 
 
+class _RootedTransport(FakeTransport):
+    """A transport whose remote directory sits under a server root."""
+
+    def resolve_remote_dir(self, remote_dir: str) -> str:
+        return f"/shared-docker{remote_dir}"
+
+
+def test_a_project_run_lands_under_the_transport_root(source_tree):
+    base = _remote_replies(verify_ok=True)
+    base.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
+    transport = _RootedTransport(base.replies)
+    remote_module.run_remote(transport, _spec(), source=source_tree)
+    pushed = [path for _, path in transport.pushed]
+    assert any("/shared-docker/root/" in path for path in pushed)
+    assert any("/shared-docker/root/graft" in command for command in transport.commands)
+
+
+# --- verifying a selected source file on the GPU ---------------------------
+
+
+def test_verify_uploads_and_migrates_the_selected_file(source_tree):
+    """The report for a remote verify must describe the operator's own file.
+
+    A selected file is pushed beside the uploaded tree and named in the
+    migration command, so the evidence comes from that source rather than the
+    bundled example.
+    """
+    transport = _remote_replies(verify_ok=True)
+    transport.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
+    run = remote_module.run_remote(
+        transport,
+        _spec(),
+        source=source_tree,
+        run_file=("kernel.py", "import torch\n"),
+    )
+    assert run.filename == "kernel.py"
+    assert any(
+        path.endswith("/graft-selected/kernel.py") for _, path in transport.pushed
+    )
+    assert any(
+        "graft-selected/kernel.py" in command for command in transport.commands
+    )
+
+
+def test_verify_returns_the_pipeline_summary_for_the_report(source_tree):
+    """The pipeline step's JSON summary rides back so the UI can render it."""
+    summary = {
+        "conversion": {"measured": True, "verdict": "production_ready"},
+        "converted_source": "print('ported')\n",
+    }
+    body = json.dumps(
+        {
+            "steps": {
+                "verify_hip": {
+                    "returncode": 0,
+                    "output": "HIP VERIFICATION PASSED",
+                },
+                "pipeline": {"returncode": 0, "output": json.dumps(summary)},
+            }
+        }
+    )
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            remote_module.RESULT_MARKER: CommandResult(
+                "run", 0, f"{remote_module.RESULT_MARKER}\n{body}", ""
+            ),
+            "tar xzf": CommandResult("unpack", 0, "", ""),
+        }
+    )
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, run_file=("kernel.py", "import torch\n")
+    )
+    assert run.ok, run.error
+    assert run.summary is not None
+    assert run.summary["converted_source"] == "print('ported')\n"
+
+
+def test_verify_rejects_an_unsupported_selected_suffix(source_tree):
+    transport = _remote_replies(verify_ok=True)
+    transport.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
+    with pytest.raises(ValueError):
+        remote_module.run_remote(
+            transport, _spec(), source=source_tree, run_file=("notes.txt", "hi")
+        )
+
+
+def test_verify_rejects_an_empty_selected_file(source_tree):
+    transport = _remote_replies(verify_ok=True)
+    transport.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
+    with pytest.raises(ValueError):
+        remote_module.run_remote(
+            transport, _spec(), source=source_tree, run_file=("kernel.py", "   ")
+        )
+
+
+def test_selected_file_verify_is_not_gated_on_the_hip_toolchain(source_tree):
+    """A valid Python/ROCm target need not have a C++ compiler.
+
+    The HIP self-check failing must not mark the operator's own Python
+    migration as failed, so ``ok`` follows the pipeline result instead.
+    """
+    summary = {"conversion": {"measured": True, "verdict": "production_ready"}}
+    body = json.dumps(
+        {
+            "steps": {
+                "verify_hip": {"returncode": 1, "output": "HIP VERIFICATION FAILED"},
+                "pipeline": {"returncode": 0, "output": json.dumps(summary)},
+            }
+        }
+    )
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            remote_module.RESULT_MARKER: CommandResult(
+                "run", 0, f"{remote_module.RESULT_MARKER}\n{body}", ""
+            ),
+            "tar xzf": CommandResult("unpack", 0, "", ""),
+        }
+    )
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, run_file=("kernel.py", "import torch\n")
+    )
+    assert run.ok, run.error
+    assert run.verified is False
+
+
+def test_a_failed_selected_file_migration_is_not_ok(source_tree):
+    body = json.dumps(
+        {
+            "steps": {
+                "verify_hip": {"returncode": 0, "output": "HIP VERIFICATION PASSED"},
+                "pipeline": {"returncode": 1, "output": "Traceback: boom"},
+            }
+        }
+    )
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            remote_module.RESULT_MARKER: CommandResult(
+                "run", 0, f"{remote_module.RESULT_MARKER}\n{body}", ""
+            ),
+            "tar xzf": CommandResult("unpack", 0, "", ""),
+        }
+    )
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, run_file=("kernel.py", "import torch\n")
+    )
+    assert not run.ok
+    assert "did not complete" in run.error
+
+
+def test_a_file_run_lands_under_the_transport_root():
+    transport = _RootedTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            "import torch": CommandResult("probe-torch", 2, "GPU=unavailable", ""),
+        }
+    )
+    remote_module.run_remote_file(transport, _spec(), "converted.py", "import torch\n")
+    assert any(
+        "mkdir -p /shared-docker/root/graft/" in command
+        for command in transport.commands
+    )
+
+
+# --- AI-converted file run + verification ---------------------------------
+
+
+_NO_GPU_PROBE = GOOD_PROBE.replace(
+    "<<<agents>>>AMD Instinct MI300X VF|gfx942\n", ""
+).replace("<<<kfd_gpus>>>1\n", "<<<kfd_gpus>>>0\n")
+
+
+def _ai_body(run_rc: int = 0, verify_rc: int = 0) -> str:
+    verification = {
+        "conversion": {"verdict": "production_ready", "route": "pytorch"},
+        "parity": {"measured": True, "passed": 4, "total": 4},
+    }
+    return json.dumps(
+        {
+            "steps": {
+                "run": {"returncode": run_rc, "output": "ran the AI file"},
+                "verification": {
+                    "returncode": verify_rc,
+                    "output": json.dumps(verification),
+                },
+                "report": {"returncode": 0, "output": "# AI report"},
+            }
+        }
+    )
+
+
+def _ai_transport(body: str) -> FakeTransport:
+    return FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, GOOD_PROBE, ""),
+            remote_module.RESULT_MARKER: CommandResult(
+                "run", 0, f"{remote_module.RESULT_MARKER}\n{body}", ""
+            ),
+            "tar xzf": CommandResult("unpack", 0, "", ""),
+        }
+    )
+
+
+def test_ai_file_reports_measured_verification_not_a_claim():
+    result = remote_module.run_remote_ai_file(
+        _ai_transport(_ai_body()), _spec(), "converted_gemma.py", "import torch\n"
+    )
+    assert result["ok"] is True
+    assert result["ai_converted"] is True
+    assert result["verification"]["conversion"]["verdict"] == "production_ready"
+    assert result["verification"]["parity"]["passed"] == 4
+    assert result["report_text"] == "# AI report"
+
+
+def test_ai_file_refuses_to_upload_without_a_gpu():
+    transport = FakeTransport(
+        {"emit os": CommandResult("probe", 0, _NO_GPU_PROBE, "")}
+    )
+    result = remote_module.run_remote_ai_file(
+        transport, _spec(), "converted_gemma.py", "import torch\n"
+    )
+    assert result["ok"] is False
+    assert result["stage"] == "gpu_detection"
+    assert transport.pushed == []
+
+
+def test_ai_file_failed_run_is_not_reported_as_ok():
+    result = remote_module.run_remote_ai_file(
+        _ai_transport(_ai_body(run_rc=1)), _spec(), "converted_gemma.py", "x = 1\n"
+    )
+    assert result["ok"] is False
+    assert "did not run cleanly" in result["error"]
+
+
+def test_ai_file_failed_verification_is_not_reported_as_ok():
+    result = remote_module.run_remote_ai_file(
+        _ai_transport(_ai_body(verify_rc=1)), _spec(), "converted_gemma.py", "x = 1\n"
+    )
+    assert result["ok"] is False
+    assert "could not verify" in result["error"]
+
+
+def test_ai_file_rejects_an_unsupported_suffix():
+    with pytest.raises(ValueError):
+        remote_module.run_remote_ai_file(
+            _ai_transport(_ai_body()), _spec(), "notes.txt", "hello"
+        )
+
+
+def test_ai_file_rejects_empty_source():
+    with pytest.raises(ValueError):
+        remote_module.run_remote_ai_file(
+            _ai_transport(_ai_body()), _spec(), "converted_gemma.py", "   "
+        )
+
+
 def test_a_failed_verification_is_not_reported_as_ok(source_tree):
     transport = _remote_replies(verify_ok=False)
     transport.replies["tar xzf"] = CommandResult("unpack", 0, "", "")
@@ -567,7 +825,7 @@ def test_the_remote_script_emits_parsable_json(tmp_path):
     script.write_text(
         remote_module.REMOTE_SCRIPT.replace("__REMOTE_DIR__", f'"{project}"').replace(
             "__MARKER__", remote_module.RESULT_MARKER
-        )
+        ).replace("__PIPELINE_FILE__", "examples/01_torch_cuda_softmax.py")
     )
     completed = subprocess.run(
         ["sh", str(script)], capture_output=True, text=True, timeout=120, check=False
@@ -851,6 +1109,169 @@ class TestJupyterCommandDeadline:
         assert DEFAULT_RUN_TIMEOUT_S > 0
 
 
+class _RecordingSocket:
+    """A terminal socket that records sends and replays canned frames."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self.frames = list(frames)
+        self.sent: list[str] = []
+        self.timeouts: list[float] = []
+
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    def settimeout(self, value: float) -> None:
+        self.timeouts.append(value)
+
+    def recv(self) -> str:
+        return self.frames.pop(0) if self.frames else ""
+
+    def close(self) -> None:
+        return None
+
+
+def _stdout(text: str) -> str:
+    return json.dumps(["stdout", text])
+
+
+class TestJupyterTerminalFraming:
+    """The terminal websocket speaks JSON frames, not a raw byte pipe.
+
+    Sending the script as a bare string is accepted and then ignored by
+    jupyter_server 2.x, so the command never ran and the reader blocked on
+    output that never came. The mocked sockets in the other tests hid this,
+    because they never looked at what was sent.
+    """
+
+    def test_stdin_is_wrapped_as_a_stdin_frame(self):
+        from graft.target.jupyter import _stdin_frame
+
+        assert json.loads(_stdin_frame("echo hi")) == ["stdin", "echo hi"]
+
+    def test_a_stdout_frame_reduces_to_its_text(self):
+        from graft.target.jupyter import _decode_frame
+
+        assert _decode_frame(_stdout("hello\r\n")) == "hello\r\n"
+
+    def test_terminal_control_sequences_are_stripped(self):
+        from graft.target.jupyter import _decode_frame
+
+        # Bracketed-paste toggles and a window-title OSC, as a PTY emits them.
+        noisy = "\x1b[?2004hused=42\x1b]0;title\x07\r\n"
+        assert _decode_frame(_stdout(noisy)) == "used=42\r\n"
+
+    def test_control_frames_carry_no_output(self):
+        from graft.target.jupyter import _decode_frame
+
+        assert _decode_frame(json.dumps(["setup", {}])) == ""
+        assert _decode_frame(json.dumps(["disconnect", 1])) == ""
+
+    def test_a_non_stdout_json_frame_is_passed_through(self):
+        from graft.target.jupyter import _decode_frame
+
+        assert _decode_frame(json.dumps({"a": 1})) == json.dumps({"a": 1})
+
+    def test_raw_text_frames_still_work(self):
+        from graft.target.jupyter import _decode_frame
+
+        assert _decode_frame("plain output") == "plain output"
+
+    def test_drive_sends_a_framed_script(self, monkeypatch):
+        from graft.target.jupyter import END, JupyterTransport
+
+        socket_ = _RecordingSocket([_stdout(f"{END}\r\n0\r\n")])
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+        monkeypatch.setattr(transport, "_open_socket", lambda *_: socket_)
+
+        transport._drive("1", "echo hi", 5)
+
+        assert json.loads(socket_.sent[0]) == ["stdin", "echo hi"]
+
+    def test_stream_sends_a_framed_command(self, monkeypatch):
+        from graft.target.jupyter import JupyterTransport
+
+        socket_ = _RecordingSocket([_stdout("used=7\n")])
+        stop = threading.Event()
+        lines: list[str] = []
+
+        def on_line(line: str) -> None:
+            lines.append(line)
+            stop.set()
+
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+        monkeypatch.setattr(transport, "_create_terminal", lambda: "1")
+        monkeypatch.setattr(transport, "_open_socket", lambda *_: socket_)
+        monkeypatch.setattr(transport, "_delete_terminal", lambda _: None)
+
+        transport.stream("while :; do :; done", on_line, stop=stop)
+
+        assert json.loads(socket_.sent[0])[0] == "stdin"
+        assert lines == ["used=7"]
+
+
+class TestJupyterServerRoot:
+    """Files land under the server's root, which is not always "/".
+
+    The terminal and the contents API share one filesystem, but only the
+    contents API is confined to the server root. An image that starts Jupyter
+    in /shared-docker served uploads from there while the shell looked under
+    /root, so the archive was never where the unpack command expected it.
+    """
+
+    def _transport(self, monkeypatch, listing: str):
+        from graft.target.jupyter import JupyterTransport
+
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+        monkeypatch.setattr(
+            transport,
+            "run",
+            lambda *_, **__: CommandResult("jupyter server list", 0, listing, ""),
+        )
+        return transport
+
+    def test_the_root_is_read_from_the_server_listing(self, monkeypatch):
+        transport = self._transport(
+            monkeypatch, "http://x:8888/?token=t :: /shared-docker\n"
+        )
+        assert transport.server_root == "/shared-docker"
+        assert (
+            transport.resolve_remote_dir("/root/graft") == "/shared-docker/root/graft"
+        )
+
+    def test_a_slash_root_leaves_paths_alone(self, monkeypatch):
+        transport = self._transport(monkeypatch, ":: /\n")
+        assert transport.server_root == "/"
+        assert transport.resolve_remote_dir("/root/graft") == "/root/graft"
+
+    def test_an_unreadable_listing_defaults_to_slash(self, monkeypatch):
+        transport = self._transport(monkeypatch, "")
+        assert transport.server_root == "/"
+
+    def test_a_directory_already_under_the_root_is_left_alone(self, monkeypatch):
+        transport = self._transport(monkeypatch, ":: /shared-docker\n")
+        assert (
+            transport.resolve_remote_dir("/shared-docker/graft")
+            == "/shared-docker/graft"
+        )
+
+    def test_contents_path_strips_a_non_slash_root(self, monkeypatch):
+        transport = self._transport(monkeypatch, ":: /shared-docker\n")
+        assert (
+            transport._contents_path("/shared-docker/root/graft/x.py")
+            == "/api/contents/root/graft/x.py"
+        )
+
+    def test_contents_path_still_works_with_a_slash_root(self, monkeypatch):
+        transport = self._transport(monkeypatch, ":: /\n")
+        assert (
+            transport._contents_path("/root/graft/x.py")
+            == "/api/contents/root/graft/x.py"
+        )
+
+
 class _DeadChannel:
     """An SSH channel whose peer has gone: every read is an immediate EOF."""
 
@@ -1044,6 +1465,28 @@ class TestDependencyScan:
         )
         assert "https://download.pytorch.org/whl/rocm6.2" in torch.command
         assert "ROCm 6.2" in torch.detail
+
+    def test_torch_install_bootstraps_pip_and_installs_vision(self):
+        from graft.target.dependencies import scan_dependencies
+
+        torch = next(
+            dep for dep in scan_dependencies(_deps_facts()) if dep.key == "torch"
+        )
+        # A bare image has python3 but no pip, so pip has to be installed first.
+        assert "apt-get install -y python3-pip" in torch.command
+        assert torch.command.index("python3-pip") < torch.command.index("pip3 install")
+        assert "pip3 install torch torchvision" in torch.command
+
+    def test_torch_install_prefers_pytorch_own_rocm_series(self):
+        from graft.target.dependencies import scan_dependencies
+
+        # A host can carry two ROCm stacks; the wheel that works is the one
+        # matching the PyTorch already on the box, not the first /opt/rocm dir.
+        facts = _deps_facts(rocm_version="10.1.0", torch_hip="7.14.60850")
+        torch = next(dep for dep in scan_dependencies(facts) if dep.key == "torch")
+        assert "https://download.pytorch.org/whl/rocm7.14" in torch.command
+        assert "rocm10.1" not in torch.command
+        assert "ROCm 7.14" in torch.detail
 
     def test_an_unknown_rocm_version_falls_back_to_pypi_with_a_warning(self):
         from graft.target.dependencies import scan_dependencies

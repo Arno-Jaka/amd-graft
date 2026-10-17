@@ -1,22 +1,20 @@
-"""Stage 8 — Agent tools.
+"""Stage 8 — Agent context helpers.
 
-The agent reaches core/ and verify/ only through these functions. That is
-the point: a bounded blast radius. If a prompt injection in a user file
-gets the model to do something, what it can reach is still these six
-read-only operations, not the filesystem and not arbitrary code.
+These pure functions are the only way the narrative layer reaches core/ and
+verify/. That is the point: a bounded blast radius. Even if a prompt
+injection in a user file got the model to request context, what it can reach
+is still these read-only computations, not the filesystem and not arbitrary
+code.
 
-Every tool is a pure function over data Graft already has. None of them
-executes user code, none of them writes files, and none of them can change
-a verdict. If a tool could set PRODUCTION_READY, the layering would be a
-lie.
+Every helper is a pure function over data Graft already has. None of them
+executes user code, none of them writes files, and none of them can change a
+verdict. If one could set PRODUCTION_READY, the layering would be a lie.
 
-The agent may call these to gather context and to propose things. The
-numbers it narrates over still come from verify/ and bench/, not from the
-model.
+The numbers the model narrates over still come from verify/ and bench/, not
+from the model.
 """
 
 import ast
-from typing import Any
 
 from graft.core import coverage as coverage_module
 from graft.verify import cases as case_module
@@ -203,61 +201,8 @@ def python_entry_points(source: str) -> dict:
     }
 
 
-class ToolBudgetExceeded(RuntimeError):
-    """Raised when a request exceeds its tool-call allowance.
-
-    A plain exception on purpose: the agent treats a failing tool as a tool
-    result and stops calling, and agent._run converts anything raised into
-    report text rather than letting it escape.
-    """
-
-
-class _Budget:
-    """Counts tool calls so one runaway request cannot loop forever.
-
-    Agno's Agent has no tool-call cap of its own, so the bound is enforced
-    here instead. Counted per build_tools() call, which is once per agent
-    construction, so the limit applies per narrative request.
-    """
-
-    def __init__(self, limit: int | None):
-        self.limit = limit
-        self.spent = 0
-
-    def spend(self, name: str) -> None:
-        if self.limit is None:
-            return
-        self.spent += 1
-        if self.spent > self.limit:
-            raise ToolBudgetExceeded(
-                f"tool call limit reached ({self.limit}); refusing {name}"
-            )
-
-
-def _with_budget(fn, budget: _Budget):
-    """Wrap a tool so it consumes from the budget.
-
-    The signature is copied explicitly because Agno builds the tool schema
-    by inspecting parameters, and a bare *args/**kwargs wrapper would
-    produce an empty-args schema.
-    """
-    import functools
-    import inspect
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        budget.spend(fn.__name__)
-        return fn(*args, **kwargs)
-
-    wrapper.__signature__ = inspect.signature(fn)
-    return wrapper
-
-
-# Agno tool wrappers. Each returns JSON-serialisable data and nothing
-# else. Named explicitly because Agno derives the tool schema from the
-# name and docstring, so the wording here is part of the contract with
-# the model.
-
+# The read-only context helpers, named so a caller can enumerate them. They
+# return JSON-serialisable data and nothing else.
 TOOL_FUNCTIONS = (
     inspect_changes,
     describe_coverage,
@@ -266,33 +211,3 @@ TOOL_FUNCTIONS = (
     suggest_test_shapes,
     python_entry_points,
 )
-
-TOOLS: list[Any] = []
-
-
-def _register(max_calls: int | None = None) -> None:
-    from agno.tools.function import Function as AgnoFunction
-
-    budget = _Budget(max_calls)
-    TOOLS.extend(
-        AgnoFunction.from_callable(_with_budget(fn, budget)) for fn in TOOL_FUNCTIONS
-    )
-
-
-def build_tools(max_calls: int | None = None) -> list[Any]:
-    """Tool list for the agent. Empty if agno is unavailable.
-
-    ``max_calls`` caps how many tools one request may invoke. It is
-    ignored on the second and later calls, because Agno registers a tool
-    once and Graft builds one agent per request.
-
-    Returning an empty list rather than raising keeps the agent optional:
-    a missing optional dependency must not take down the product.
-    """
-    if TOOLS:
-        return list(TOOLS)
-    try:
-        _register(max_calls)
-    except ImportError:
-        return []
-    return list(TOOLS)

@@ -35,7 +35,7 @@ class FakeResponse:
 
 
 class FakeAgent:
-    """Stands in for an Agno agent. Records prompts instead of sending them."""
+    """Stands in for a model client. Records prompts instead of sending them."""
 
     def __init__(self, reply: str = "fake reply", raises: Exception | None = None):
         self.reply = reply
@@ -173,7 +173,9 @@ def test_product_works_with_agent_directory_deleted():
     that failure mode.
 
     This file is excluded from the inner run because it copies the tree
-    again; including it would recurse without end.
+    again; including it would recurse without end. The agent's own test
+    modules (this one and test_gemma.py) are excluded because they import
+    the directory the copy deletes; every other module must still pass.
     """
     import tempfile
 
@@ -225,6 +227,7 @@ def test_product_works_with_agent_directory_deleted():
                 "tests",
                 "-q",
                 "--ignore=tests/test_agent.py",
+                "--ignore=tests/test_gemma.py",
             ],
             cwd=clone,
             capture_output=True,
@@ -459,20 +462,25 @@ def test_finding_prompt_includes_severity_meaning():
 # --- tools ----------------------------------------------------------------
 
 
-def test_tools_register_with_required_arguments():
-    registered = {tool.name: tool for tool in tools.build_tools()}
-    assert len(registered) == 6
-    for name in ("inspect_changes", "describe_coverage", "python_entry_points"):
-        assert registered[name].parameters["required"] == ["source"], name
+def test_tools_register_as_pure_functions():
+    names = {func.__name__ for func in tools.TOOL_FUNCTIONS}
+    assert len(names) == 6
+    assert {"inspect_changes", "describe_coverage", "python_entry_points"} <= names
 
 
-def test_tools_take_json_scalars_only():
+def test_source_tools_take_source_text_not_objects():
     """A model can only pass JSON, so no tool may take a domain object."""
-    registered = {tool.name: tool for tool in tools.build_tools()}
-    assert registered["existing_case_coverage"].parameters.get("required") == []
-    for name, tool in registered.items():
-        for prop in tool.parameters.get("properties", {}).values():
-            assert "object" not in str(prop.get("type", "")), f"{name} takes an object"
+    import inspect
+
+    for name in (
+        "inspect_changes",
+        "describe_coverage",
+        "known_hip_equivalents",
+        "python_entry_points",
+    ):
+        params = list(inspect.signature(getattr(tools, name)).parameters)
+        assert params == ["source"], name
+    assert list(inspect.signature(tools.existing_case_coverage).parameters) == []
 
 
 def test_inspect_changes_runs_the_real_converter():
@@ -634,32 +642,6 @@ def test_model_call_is_bounded_by_a_timeout():
     result = agent._run(Hangs(), "prompt", timeout=0.2)
     assert result.startswith(agent.NOT_AVAILABLE)
     assert "timed out" in result
-
-
-def test_tool_call_limit_is_enforced_at_the_tool_boundary():
-    """Agno has no cap of its own, so Graft enforces one."""
-    tools.TOOLS.clear()
-    capped = {tool.name: tool for tool in tools.build_tools(max_calls=2)}
-    try:
-        assert capped["describe_coverage"].entrypoint("int x;")
-        assert capped["describe_coverage"].entrypoint("int x;")
-        with pytest.raises(tools.ToolBudgetExceeded):
-            capped["describe_coverage"].entrypoint("int x;")
-    finally:
-        tools.TOOLS.clear()
-        tools.build_tools()
-
-
-def test_budgeted_tools_keep_their_schemas():
-    """The wrapper must not degrade a tool to an empty-args schema."""
-    tools.TOOLS.clear()
-    capped = {tool.name: tool for tool in tools.build_tools(max_calls=4)}
-    try:
-        assert capped["inspect_changes"].parameters["required"] == ["source"]
-        assert capped["suggest_test_shapes"].parameters["required"] == ["operation"]
-    finally:
-        tools.TOOLS.clear()
-        tools.build_tools()
 
 
 def test_model_test_case_proposals_are_not_discarded():

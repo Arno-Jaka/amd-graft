@@ -158,6 +158,10 @@ find_python() {
 pybin="$(find_python)"
 emit python "${pybin:-$(command -v python3 2>/dev/null || echo none)}"
 emit torch "$(if [ -n "$pybin" ]; then "$pybin" -c 'import torch;v=torch.__version__;ok=torch.cuda.is_available();n=torch.cuda.get_device_name(0) if ok else "none";print(v+chr(124)+n)' 2>/dev/null || true; fi)"
+# The ROCm series PyTorch is built against is the one whose wheel index will
+# work, and it can differ from the /opt/rocm version when a host carries more
+# than one stack. Report it so the torch install targets the right index.
+emit torch_hip "$(if [ -n "$pybin" ]; then "$pybin" -c 'import torch;print(getattr(torch.version,"hip","") or "")' 2>/dev/null || true; fi)"
 """
 
 
@@ -183,6 +187,7 @@ class TargetFacts:
     tools: dict[str, str] = field(default_factory=dict)
     torch_version: str = ""
     torch_gpu: str = ""
+    torch_hip: str = ""
     device_report: str = ""
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -403,6 +408,7 @@ def detect(transport) -> TargetFacts:
         tools=tools,
         torch_version=torch_version,
         torch_gpu=torch_gpu,
+        torch_hip=fields.get("torch_hip", "").strip(),
         device_report=fields.get("device_report", "")[:2000],
         problems=problems,
         notes=notes,

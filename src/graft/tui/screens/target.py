@@ -68,11 +68,6 @@ def _field(label: str, control: Input) -> ComposeResult:
 class TargetScreen(Vertical):
     """Run a local migration or check and verify a remote GPU target."""
 
-    AI_MODELS: ClassVar[dict[str, str]] = {
-        "openai": "gpt-4o-mini",
-        "gemini": "gemini-3.8-flash",
-        "groq": "openai/gpt-oss-120b",
-    }
     # Seconds to wait before each automatic reconnect attempt after a live
     # connection drops. Three tries, spaced out: a brief network blip is ridden
     # out, while a genuinely gone host is not hammered hard enough to trip
@@ -83,6 +78,10 @@ class TargetScreen(Vertical):
         super().__init__(*args, **kwargs)
         self._converted_source = ""
         self._converted_filename = ""
+        # The source chosen for a remote verify run, kept so the results screen
+        # can render the original next to the remote conversion.
+        self._verify_original_source = ""
+        self._verify_source_path = ""
         self._preview_timer: Timer | None = None
         # The last successful remote connection, kept so the dependency scan
         # and the live metrics can re-open the same target without the user
@@ -99,6 +98,9 @@ class TargetScreen(Vertical):
         self._reconnect_attempts = 0
         self._reconnect_timer: Timer | None = None
         self._operation_active = False
+        # The Gemma endpoint captured from the form when a migration starts;
+        # reused by the results screen for the "convert with Gemma" action.
+        self._ai_options: dict[str, str] = {}
 
     _LOGO = r""" ________    ________     ________    ________   _________
  |\   ____\  |\   __  \   |\   __  \  |\  _____\ |\___   __\
@@ -142,24 +144,25 @@ class TargetScreen(Vertical):
                     "The migration runs through Graft’s disposable worker. It accepts one .py or .cu file.",
                     classes="hint",
                 )
-                with Collapsible(title="AI review settings", collapsed=True):
-                    yield Label("AI review provider", classes="field-label")
-                    yield Select(
-                        [("OpenAI", "openai"), ("Gemini", "gemini"), ("Groq", "groq")],
-                        value="openai",
-                        allow_blank=False,
-                        id="ai-provider",
-                    )
-                    yield Label("Model ID (optional)", classes="field-label")
-                    yield Input(placeholder="e.g., gpt-4o-mini", id="ai-model")
-                    yield Label("Provider API key (optional)", classes="field-label")
+                with Collapsible(
+                    title="AI review settings (Google Gemma)", collapsed=True
+                ):
+                    yield Label("Gemma base URL", classes="field-label")
+                    yield Input(value=config.LLM_BASE_URL, id="ai-base-url")
+                    yield Label("Model", classes="field-label")
+                    yield Input(value=config.LLM_MODEL, id="ai-model")
+                    yield Label("API key (optional)", classes="field-label")
                     yield Input(
                         password=True,
-                        placeholder="Used for this review only",
+                        placeholder="Blank uses Graft’s built-in Gemma key",
                         id="ai-api-key",
                     )
                     yield Static(
-                        "When a key is provided, the original and complete converted source are sent to the selected provider. The key is not saved. AI review is advisory; GPU execution and parity are reported separately.",
+                        "The AI report and the “Convert with Google Gemma” action send "
+                        "the source to Google Gemma through the endpoint above. Leave the "
+                        "key blank to use Graft’s shared demo key, or paste your own; the "
+                        "key is used for this run only and is not saved. AI output is "
+                        "advisory — GPU execution and parity are measured separately.",
                         classes="hint",
                     )
                 with Horizontal(classes="button-row", id="local-actions"):
@@ -382,10 +385,6 @@ class TargetScreen(Vertical):
             self._gpu_status("set_waiting", "DETECT THE SELECTED TARGET")
             if event.select.id == "location-select":
                 self._on_location_changed(str(event.value))
-        elif event.select.id == "ai-provider":
-            provider = str(event.value)
-            model = self.query_one("#ai-model", Input)
-            model.value = self.AI_MODELS.get(provider, "")
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id in {"ssh-host", "ssh-username", "jupyter-host"}:
@@ -567,30 +566,18 @@ class TargetScreen(Vertical):
             self._show_error("The source file is empty.")
             return
 
-        provider = str(self.query_one("#ai-provider", Select).value)
-        model_id = self.query_one("#ai-model", Input).value.strip()
-        api_key = self.query_one("#ai-api-key", Input).value.strip()
+        # Blank key means "use Graft's built-in Gemma key"; the pipeline falls
+        # back to config.LLM_API_KEY when the option is empty. The AI report is
+        # always requested so the section is populated on every conversion.
+        self._ai_options: dict[str, str] = self._ai_options_from_form()
         options: dict[str, Any] = {
             "run_parity": True,
             "run_bench": True,
-            # This screen uses the explicit provider/key form below. Do not
-            # call an ambient environment-configured model when the user has
-            # not requested review here.
+            # The explicit Gemma endpoint owns this run's one or two model
+            # calls; do not also invoke an ambient environment-configured model.
             "with_narrative": False,
+            "ai_review": dict(self._ai_options),
         }
-        if api_key:
-            # The model is optional: fall back to a sensible per-provider
-            # default so a user who does not know a model name can still get
-            # an advisory review.
-            resolved_model = model_id or self.AI_MODELS.get(provider, "")
-            if not resolved_model:
-                self._show_error("Enter a model ID for the selected AI provider.")
-                return
-            options["ai_review"] = {
-                "provider": provider,
-                "model": resolved_model,
-                "api_key": api_key,
-            }
 
         self._set_busy(f"Migrating {path.name} in a disposable worker…")
         self.run_worker(
@@ -601,6 +588,49 @@ class TargetScreen(Vertical):
             thread=True,
             exit_on_error=False,
         )
+
+    def _ai_options_from_form(self) -> dict[str, str]:
+        """The Gemma endpoint captured from the form, with built-in fallbacks.
+
+        A blank key means "use Graft's built-in key"; the pipeline substitutes
+        ``config.LLM_API_KEY`` when the option is empty.
+        """
+        base_url = (
+            self.query_one("#ai-base-url", Input).value.strip() or config.LLM_BASE_URL
+        )
+        model_id = self.query_one("#ai-model", Input).value.strip() or config.LLM_MODEL
+        api_key = self.query_one("#ai-api-key", Input).value.strip()
+        return {"base_url": base_url, "model": model_id, "api_key": api_key}
+
+    def _selected_source_file(self) -> tuple[str, str, str] | None:
+        """Read the source in the path field for a remote verify run.
+
+        Returns ``(filename, source, path)`` when a file is chosen, ``("", "",
+        "")`` when the field is empty (the caller then falls back to the bundled
+        example), and ``None`` when the field names something unusable — in
+        which case the error has already been shown.
+        """
+        path_text = self.query_one("#source-path", Input).value.strip()
+        if not path_text:
+            return ("", "", "")
+        path = Path(path_text).expanduser()
+        try:
+            if path.suffix.lower() not in {".py", ".cu"}:
+                raise ValueError("Choose a .py or .cu source file.")
+            if not path.is_file():
+                raise FileNotFoundError(f"No such source file: {path}")
+            if path.stat().st_size > config.UI_MAX_UPLOAD_BYTES:
+                limit_kb = config.UI_MAX_UPLOAD_BYTES // 1024
+                raise ValueError(
+                    f"The source file is larger than the {limit_kb} KB limit."
+                )
+            source = path.read_text(encoding="utf-8")
+            if not source.strip():
+                raise ValueError("The selected source file is empty.")
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._show_error(str(exc))
+            return None
+        return (path.name, source, str(path))
 
     def _run_local_migration(
         self,
@@ -642,21 +672,40 @@ class TargetScreen(Vertical):
             self.app.call_from_thread(self._local_probe_done, {}, str(exc))
 
     def _start_remote(self, mode: str) -> None:
+        run_file: tuple[str, str] | None = None
+        original_source = ""
+        self._verify_original_source = ""
+        self._verify_source_path = ""
         if mode == "verify":
             blocking = self._blocking_dependencies(None)
             if blocking:
                 self._show_dependency_block("Remote verification", blocking)
                 return
+            # Verify the file chosen in the app so the report and the source
+            # comparison describe the operator's own code. With no file chosen,
+            # fall back to Graft's bundled example as a toolchain check.
+            selected = self._selected_source_file()
+            if selected is None:
+                return
+            filename, original_source, source_path = selected
+            if filename:
+                run_file = (filename, original_source)
+                self._ai_options = self._ai_options_from_form()
+                self._verify_original_source = original_source
+                self._verify_source_path = source_path
         fields = self._remote_fields()
         self._pending_fields = dict(fields)
-        message = (
-            "Detecting the remote target. No files will be uploaded…"
-            if mode == "probe"
-            else "Uploading this project and starting remote HIP verification…"
-        )
+        if mode == "probe":
+            message = "Detecting the remote target. No files will be uploaded…"
+        elif run_file is not None:
+            message = (
+                f"Uploading this project and migrating {run_file[0]} on the GPU…"
+            )
+        else:
+            message = "Uploading this project and starting remote HIP verification…"
         self._set_busy(message)
         self.run_worker(
-            partial(self._run_remote, mode, fields),
+            partial(self._run_remote, mode, fields, run_file, original_source),
             name=f"remote-{mode}",
             group="graft-operation",
             exclusive=True,
@@ -738,6 +787,58 @@ class TargetScreen(Vertical):
                 None,
                 "file",
                 "Graft could not upload or run the converted file. Check the target details and try again.",
+            )
+
+    def start_ai_remote_file(self, filename: str, source: str) -> None:
+        """Upload and verify a Gemma-converted file on the remote GPU.
+
+        Called by the results screen once the user confirms they want to run
+        the AI version. It reuses the same target form as every other remote
+        action, so the connection details are entered in one place.
+        """
+        if not source.strip() or not filename:
+            self._show_error("There is no AI-converted file to run.")
+            return
+        fields = self._remote_fields()
+        self._pending_fields = dict(fields)
+        self._set_busy(
+            f"Uploading {filename} and verifying the AI version on the GPU…"
+        )
+        self.run_worker(
+            partial(self._run_remote_ai_file, fields, filename, source),
+            name="remote-ai-file",
+            group="graft-operation",
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _run_remote_ai_file(
+        self, fields: dict[str, Any], filename: str, source: str
+    ) -> None:
+        try:
+            from graft.target import run_remote_ai_file
+
+            spec = parse_form(fields)
+            if spec.kind == "ssh":
+                from graft.target.ssh import SSHTransport
+
+                transport = SSHTransport(spec)
+            else:
+                from graft.target.jupyter import JupyterTransport
+
+                transport = JupyterTransport(spec)
+            with transport:
+                result = run_remote_ai_file(transport, spec, filename, source)
+            self.app.call_from_thread(self._remote_done, result, "ai_file", "")
+        except (TargetError, TransportError, ValueError) as exc:
+            self.app.call_from_thread(self._remote_done, None, "ai_file", str(exc))
+        except Exception:
+            self.app.call_from_thread(
+                self._remote_done,
+                None,
+                "ai_file",
+                "Graft could not upload or verify the AI-converted file. Check the target details and try again.",
             )
 
     def _remote_host(self) -> str:
@@ -823,7 +924,13 @@ class TargetScreen(Vertical):
             tone="success",
         )
 
-    def _run_remote(self, mode: str, fields: dict[str, Any]) -> None:
+    def _run_remote(
+        self,
+        mode: str,
+        fields: dict[str, Any],
+        run_file: tuple[str, str] | None = None,
+        original_source: str = "",
+    ) -> None:
         try:
             spec = parse_form(fields)
             if spec.kind == "ssh":
@@ -840,9 +947,30 @@ class TargetScreen(Vertical):
                     spec,
                     source=config.PROJECT_ROOT,
                     probe_only=(mode == "probe"),
+                    run_file=run_file,
                 )
-            self.app.call_from_thread(self._remote_done, result.as_dict(), mode, "")
-        except (TargetError, TransportError) as exc:
+            data = result.as_dict()
+            if mode == "verify" and run_file is not None and data.get("summary"):
+                # The run was measured on the GPU but never called the model, so
+                # review it here. The provider key stays on this machine; only
+                # the evidence projection crossed the wire.
+                from graft import pipeline
+
+                summary = data["summary"]
+                try:
+                    summary["ai_review"] = pipeline.review_with_ai(
+                        original_source,
+                        str(summary.get("converted_source") or ""),
+                        summary,
+                        self._ai_options,
+                    )
+                except Exception:
+                    summary["ai_review"] = {
+                        "available": False,
+                        "reason": "The AI review could not be completed.",
+                    }
+            self.app.call_from_thread(self._remote_done, data, mode, "")
+        except (TargetError, TransportError, ValueError) as exc:
             self.app.call_from_thread(self._remote_done, None, mode, str(exc))
         except Exception:
             # Connection libraries can include request details in arbitrary
@@ -938,7 +1066,11 @@ class TargetScreen(Vertical):
                 tone = "warning"
             self._set_status(f"Migration complete · {filename}", tone=tone)
             self.app.query_one("#results-view", ResultsScreen).show_local(
-                summary, filename, source_path, original_source
+                summary,
+                filename,
+                source_path,
+                original_source,
+                ai_options=self._ai_options,
             )
             self.query_one("#run-converted", Button).disabled = not bool(
                 self._converted_source
@@ -985,6 +1117,10 @@ class TargetScreen(Vertical):
         # attempt so they do not remain visible in the form after completion.
         self.query_one("#ssh-passphrase", Input).value = ""
         self.query_one("#jupyter-token", Input).value = ""
+        if mode == "verify":
+            # The Gemma key is likewise request-only for the locally generated
+            # review.
+            self.query_one("#ai-api-key", Input).value = ""
         if error or result is None:
             self._gpu_status("set_disconnected", "TARGET CONNECTION FAILED")
             message = error or "The remote request returned no result."
@@ -1005,8 +1141,14 @@ class TargetScreen(Vertical):
             self._pending_fields = None
             self._gpu_status("set_target_facts", result.get("facts"))
             state = "ready" if result.get("ok") else "needs attention"
+            label = {
+                "ai_file": "AI version run",
+                "file": "converted file run",
+                "probe": "detect",
+                "verify": "verification",
+            }.get(mode, mode)
             self._set_status(
-                f"Remote {mode} complete · target {state}",
+                f"Remote {label} complete · target {state}",
                 tone="success" if result.get("ok") else "warning",
             )
             # The moment a target connects, check it for the tools the
@@ -1024,7 +1166,9 @@ class TargetScreen(Vertical):
                     label=str((self._connected_fields or {}).get("host") or "target"),
                 )
             results = self.app.query_one("#results-view", ResultsScreen)
-            if mode == "file":
+            if mode == "ai_file":
+                results.show_remote_ai_file(result)
+            elif mode == "file":
                 blocked = []
                 if result.get("stage") == "pytorch_gpu_check":
                     suffix = Path(result.get("filename", "")).suffix.lower()
@@ -1035,6 +1179,26 @@ class TargetScreen(Vertical):
                     )
                 else:
                     results.show_remote_file(result)
+            elif mode == "verify" and result.get("summary") and result.get("filename"):
+                # A real migration measured on the GPU: show the same full
+                # report a local run shows, including the source comparison and
+                # the AI review generated on this machine.
+                note = "" if result.get("ok") else str(result.get("error") or "")
+                if not result.get("verified"):
+                    toolchain = (
+                        "The HIP toolchain self-check did not pass on the target. "
+                        "The report above is still from your file's own migration."
+                    )
+                    note = f"{note}\n\n{toolchain}" if note else toolchain
+                results.show_remote_report(
+                    result["summary"],
+                    result.get("filename") or "source",
+                    self._verify_source_path,
+                    self._verify_original_source,
+                    ai_options=self._ai_options,
+                    facts=result.get("facts"),
+                    note=note,
+                )
             else:
                 note = ""
                 if mode == "probe" and (self._connected_fields or {}).get(
