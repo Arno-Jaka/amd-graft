@@ -1188,6 +1188,11 @@ class TargetScreen(Vertical):
                     facts=result.get("facts"),
                     note=note,
                 )
+            elif mode == "verify" and result.get("missing_torch"):
+                results.show_error(
+                    "PyTorch not found on the target",
+                    str(result.get("error") or ""),
+                )
             else:
                 note = ""
                 kind = (self._connected_fields or {}).get("kind")

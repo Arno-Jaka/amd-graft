@@ -291,6 +291,44 @@ def test_a_verification_that_did_not_complete_leaves_the_upload_button_disabled(
     assert after is True
 
 
+def test_a_missing_torch_verification_shows_a_short_recommendation():
+    """A target without PyTorch reads as a one-line fix, not a step dump."""
+
+    async def main() -> str:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._remote_done(
+                {
+                    "ok": False,
+                    "filename": "m.py",
+                    "facts": _target_facts(torch_version=""),
+                    "missing_torch": True,
+                    "error": (
+                        "PyTorch was not found on the target host. Use the "
+                        "Jupyter option, or install PyTorch on the host, to run "
+                        "the migration."
+                    ),
+                    "steps": {
+                        "verify_hip": {"returncode": 0},
+                        "pipeline": {"returncode": 1},
+                    },
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            results = app.query_one("#results-view", ResultsScreen)
+            return "\n".join(str(w.render()) for w in results.query(Static))
+
+    blob = asyncio.run(main())
+    assert "PyTorch not found on the target" in blob
+    assert "Jupyter" in blob
+    assert "steps:" not in blob
+    assert "pipeline" not in blob
+
+
 def test_verifying_the_bundled_example_does_not_arm_the_upload_button():
     """The fallback run never touched the operator's file."""
 

@@ -156,6 +156,7 @@ class RemoteRun:
     filename: str = ""
     verified: bool = False
     summary: dict[str, Any] | None = None
+    missing_torch: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +170,7 @@ class RemoteRun:
             "filename": self.filename,
             "verified": self.verified,
             "summary": self.summary,
+            "missing_torch": self.missing_torch,
         }
 
 
@@ -239,22 +241,25 @@ def _script_failure_hint(result: Any) -> str:
 _MISSING_TORCH = re.compile(r"No module named ['\"]?torch", re.IGNORECASE)
 
 
-def _migration_failure(facts: TargetFacts, pipeline_output: str) -> str:
-    """Explain a failed migration, calling out a missing PyTorch.
+def _torch_missing(facts: TargetFacts, pipeline_output: str) -> bool:
+    """True when the pipeline failed because the target has no PyTorch.
 
     The pipeline imports torch, so a host without it cannot migrate at all: the
     command dies on import and no JSON report is produced. That is the ordinary
     shape of a container-based image, where PyTorch lives off-host and SSH never
-    sees it, so the raw traceback is replaced with a caution that names the real
-    cause rather than a bare "the migration did not complete".
+    sees it.
     """
-    if not facts.torch_version or _MISSING_TORCH.search(pipeline_output or ""):
+    return not facts.torch_version or bool(
+        _MISSING_TORCH.search(pipeline_output or "")
+    )
+
+
+def _migration_failure(facts: TargetFacts, pipeline_output: str) -> str:
+    """Explain a failed migration, naming a missing PyTorch when that is it."""
+    if _torch_missing(facts, pipeline_output):
         return (
-            "The migration needs PyTorch on the target, but none was found on "
-            "the host. An image that keeps PyTorch inside a container (or "
-            "installs it per session) looks empty from SSH. Install PyTorch on "
-            "the host (see the dependency section) or connect with the Jupyter "
-            "transport, then run again."
+            "PyTorch was not found on the target host. Use the Jupyter option, "
+            "or install PyTorch on the host, to run the migration."
         )
     return (
         "The migration did not complete on the target. See the pipeline step "
@@ -443,13 +448,12 @@ def run_remote(
     pipeline_rc = int((steps.get("pipeline") or {}).get("returncode", 1))
 
     problems = list(facts.problems)
+    missing_torch = False
     if run_file is not None:
         if summary is None or pipeline_rc != 0:
-            problems.append(
-                _migration_failure(
-                    facts, (steps.get("pipeline") or {}).get("output", "")
-                )
-            )
+            pipeline_output = (steps.get("pipeline") or {}).get("output", "")
+            missing_torch = _torch_missing(facts, pipeline_output)
+            problems.append(_migration_failure(facts, pipeline_output))
         ok = summary is not None and pipeline_rc == 0 and not problems
     else:
         if not verified:
@@ -471,6 +475,7 @@ def run_remote(
         filename=filename,
         verified=verified,
         summary=summary,
+        missing_torch=missing_torch,
     )
 
 

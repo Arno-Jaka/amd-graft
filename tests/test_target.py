@@ -663,7 +663,9 @@ def test_a_file_migration_without_torch_names_the_missing_dependency(source_tree
         transport, _spec(), source=source_tree, run_file=("kernel.py", "import torch\n")
     )
     assert not run.ok
-    assert "needs PyTorch" in run.error
+    assert run.missing_torch
+    assert "PyTorch was not found" in run.error
+    assert "Jupyter" in run.error
     assert "did not complete" not in run.error
 
 
