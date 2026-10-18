@@ -912,6 +912,40 @@ class TestJupyterUrlHandling:
             parse_form({"kind": "jupyter", "host": "ftp://gpu.example.com"})
 
 
+class TestJupyterTokenPasting:
+    """The token is usually copied from the address bar or from
+    ``jupyter server list``, both of which wrap it in ``token=…``. Sending that
+    prefix in the Authorization header makes Jupyter answer 403 (reported as
+    "Check the token") even though the token itself is correct."""
+
+    TOKEN = "O7NRmFuJbV5DGQGX01yKzbtYBJlbxqZxb7BuGKTZAivXdCzYy"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            TOKEN,
+            f"token={TOKEN}",
+            f"?token={TOKEN}",
+            f"http://gpu.example.com/lab?token={TOKEN}",
+            f"http://gpu.example.com:8888/?token={TOKEN}",
+            f"  {TOKEN}\n",
+        ],
+    )
+    def test_any_pasted_form_reduces_to_the_bare_token(self, raw):
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com", "token": raw})
+        assert spec.token == self.TOKEN
+
+    def test_a_url_with_no_token_yields_an_empty_token(self):
+        spec = parse_form(
+            {"kind": "jupyter", "host": "gpu.example.com", "token": "http://h/lab"}
+        )
+        assert spec.token == ""
+
+    def test_an_empty_token_stays_empty(self):
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com", "token": ""})
+        assert spec.token == ""
+
+
 class TestJupyterVersionGate:
     @pytest.mark.parametrize(
         ("version", "supported"),

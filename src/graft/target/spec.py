@@ -57,6 +57,34 @@ def _clean(value: Any) -> str:
     return str(value).strip()
 
 
+def _clean_jupyter_token(raw: Any) -> str:
+    """Reduce a pasted Jupyter token to its bare value.
+
+    The token is usually copied from the browser address bar or from
+    ``jupyter server list``, both of which present it as ``?token=…`` or
+    ``token=…``. Sending that prefix in the ``Authorization`` header makes
+    Jupyter answer 403 (reported as "Check the token") even though the token
+    itself is correct. A whole URL pasted into the token field is reduced to
+    its ``token`` query value; a bare token is left untouched.
+    """
+    value = _clean(raw)
+    if not value:
+        return ""
+    looks_wrapped = (
+        "://" in value or "token=" in value.lower() or value.startswith("?")
+    )
+    if looks_wrapped:
+        candidate = (
+            value if "://" in value else f"http://x?{value.lstrip('?')}"
+        )
+        for segment in urlsplit(candidate).query.split("&"):
+            key, _, val = segment.partition("=")
+            if key.lower() == "token" and val:
+                return val.strip()
+        return "" if "://" in value else value
+    return value
+
+
 def _coerce_port(raw: Any, default: int) -> int:
     """Normalise a port to a usable int, raising on nonsense."""
     if raw in (None, "", 0):
@@ -142,7 +170,7 @@ class TargetSpec:
             self, "remote_dir", _clean(self.remote_dir) or DEFAULT_REMOTE_DIR
         )
         object.__setattr__(self, "key_passphrase", _clean(self.key_passphrase))
-        object.__setattr__(self, "token", _clean(self.token))
+        object.__setattr__(self, "token", _clean_jupyter_token(self.token))
         object.__setattr__(
             self, "command_timeout_s", _coerce_timeout(self.command_timeout_s)
         )
