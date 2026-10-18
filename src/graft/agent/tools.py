@@ -87,9 +87,6 @@ def known_hip_equivalents(source: str) -> list[dict]:
 
     present = {entry["cuda"] for entry in found}
     for finding in coverage_module.scan(source):
-        # Report the construct as it appears in the source, not the rule's
-        # human label. "warp shuffle intrinsic" is prose; the model needs
-        # __shfl_xor_sync so it can search for it and write a replacement.
         matched = finding.matched_text or finding.symbol
         if any(matched in cuda for cuda in present):
             continue
@@ -201,8 +198,6 @@ def python_entry_points(source: str) -> dict:
     }
 
 
-# The read-only context helpers, named so a caller can enumerate them. They
-# return JSON-serialisable data and nothing else.
 TOOL_FUNCTIONS = (
     inspect_changes,
     describe_coverage,

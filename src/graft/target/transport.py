@@ -13,9 +13,6 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Protocol
 
-# Remote output is captured, so it has to be bounded. A chatty toolchain can
-# emit megabytes of warnings, and an unbounded read is how a UI request turns
-# into an out-of-memory kill.
 MAX_OUTPUT_CHARS = 200_000
 TRUNCATION_NOTICE = "\n... [output truncated] ...\n"
 

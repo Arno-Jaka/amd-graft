@@ -201,7 +201,6 @@ def convert_with_gemma(
 
     code = str(parsed.get("code", "")).strip("\n")
     out_name = str(parsed.get("filename") or "").strip() or _default_filename(filename)
-    # Reject a path escape from a model-chosen name; keep the basename only.
     out_name = out_name.replace("\\", "/").rsplit("/", 1)[-1] or _default_filename(
         filename
     )

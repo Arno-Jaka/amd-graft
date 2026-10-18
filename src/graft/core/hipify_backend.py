@@ -34,10 +34,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# CUDA runtime and driver API to HIP equivalents. Ordered longest-first at
-# build time so that a prefix cannot shadow a longer symbol.
 CUDA_TO_HIP: dict[str, str] = {
-    # memory
     "cudaMalloc": "hipMalloc",
     "cudaFree": "hipFree",
     "cudaMemcpy": "hipMemcpy",
@@ -45,20 +42,17 @@ CUDA_TO_HIP: dict[str, str] = {
     "cudaMemcpyHostToDevice": "hipMemcpyHostToDevice",
     "cudaMemcpyDeviceToHost": "hipMemcpyDeviceToHost",
     "cudaMemset": "hipMemset",
-    # errors and setup
     "cudaGetLastError": "hipGetLastError",
     "cudaPeekAtLastError": "hipPeekAtLastError",
     "cudaDeviceSynchronize": "hipDeviceSynchronize",
     "cudaGetErrorString": "hipGetErrorString",
     "cudaSuccess": "hipSuccess",
     "cudaGetErrorName": "hipGetErrorName",
-    # device queries
     "cudaGetDeviceCount": "hipGetDeviceCount",
     "cudaGetDeviceProperties": "hipGetDeviceProperties",
     "cudaSetDevice": "hipSetDevice",
     "cudaGetDevice": "hipGetDevice",
     "cudaDeviceProp": "hipDeviceProp_t",
-    # streams and events
     "cudaStream_t": "hipStream_t",
     "cudaStreamCreate": "hipStreamCreate",
     "cudaStreamDestroy": "hipStreamDestroy",
@@ -71,7 +65,6 @@ CUDA_TO_HIP: dict[str, str] = {
     "cudaEventElapsedTime": "hipEventElapsedTime",
 }
 
-# Headers, rewritten to the HIP equivalents.
 HEADER_MAP: dict[str, str] = {
     "cuda_runtime.h": "hip/hip_runtime.h",
     "cuda_runtime_api.h": "hip/hip_runtime_api.h",
@@ -80,9 +73,6 @@ HEADER_MAP: dict[str, str] = {
     "nvtx3/nvToolsExt.h": "hip/hip_runtime.h",
 }
 
-# Symbols that must NOT be renamed automatically. HIP keeps the CUDA
-# spelling for the execution-model qualifiers, so renaming would break
-# the file; they are verified present instead.
 PASSTHROUGH_QUALIFIERS = (
     "__global__",
     "__device__",
@@ -97,8 +87,6 @@ PASSTHROUGH_QUALIFIERS = (
     "warpSize",
 )
 
-# Execution-model constructs whose semantics differ on AMD. Reported as
-# unmapped so a human reviews them.
 LANE_SEMANTICS = {
     "__shfl": "wavefront shuffle is lane-width dependent (CUDA 32, AMD 64)",
     "__ballot": "ballot width differs across vendors",
@@ -200,7 +188,6 @@ def run_hipify_perl(source: str, path: Path | None = None) -> HipifyResult | Non
     )
 
 
-# Reported changes are capped so a large file cannot flood the report.
 MAX_REPORTED_CHANGES = 60
 
 
@@ -237,7 +224,6 @@ def _diff_changes(before: str, after: str) -> list[dict]:
         right = new[j1:j2]
 
         if len(left) == len(right):
-            # Even split: a straight rename, which is the common case.
             for (name, offset), (replacement, _) in zip(left, right, strict=True):
                 if name != replacement:
                     changes.append(
@@ -249,9 +235,6 @@ def _diff_changes(before: str, after: str) -> list[dict]:
                     )
             continue
 
-        # Uneven split, usually a header rewrite. Pair what lines up and
-        # report the remainder as added or removed rather than inventing
-        # correspondence that the diff does not support.
         for (name, offset), (replacement, _) in zip(left, right, strict=False):
             if name != replacement:
                 changes.append(
@@ -306,11 +289,7 @@ def translate(source: str, path: Path | None = None) -> HipifyResult:
         "hipify-perl not found; applied Graft's built-in mapping table. "
         "Install ROCm and re-run to cross-check against the official tool."
     )
-    # Written back into result.source at the end; the local rebinds below
-    # would otherwise be lost and the caller would receive unmodified source
-    # alongside a change log claiming edits.
 
-    # Headers first, so symbol renaming does not double-rewrite a path.
     for header in sorted(HEADER_MAP, key=len, reverse=True):
         for match in list(re.finditer(re.escape(header), source)):
             replacement = HEADER_MAP[header]
@@ -357,9 +336,6 @@ def translate(source: str, path: Path | None = None) -> HipifyResult:
             }
         )
 
-    # PTX is not in LANE_SEMANTICS because it is a hard stop rather than a
-    # review item: there is no HIP equivalent at all, so a returned source
-    # containing it would look translated while remaining unportable.
     ptx = re.search(
         r"asm\s+(?:volatile\s*)?\(|%laneid|%ctaid|mma\.sync|wgmma|"
         r"ld\.global|st\.global|bar\.warp\.sync",

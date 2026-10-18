@@ -26,10 +26,6 @@ from graft.target.spec import TargetError, TargetSpec, parse_form
 from graft.target.token import discover_jupyter_token, parse_jupyter_token
 from graft.target.transport import CommandResult, TransportError, clip, quote
 
-# graft.target.detect.detect is deliberately not re-exported here. A bare
-# `detect` would shadow the submodule of the same name, so
-# `from graft.target import detect` would silently yield the function.
-# Callers wanting detection use run_remote(..., probe_only=True).
 __all__ = [
     "CommandResult",
     "Dependency",

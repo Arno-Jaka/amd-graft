@@ -48,7 +48,6 @@ class FakeTransport:
         return None
 
 
-# --- spec ------------------------------------------------------------------
 
 
 def test_empty_port_becomes_the_default_not_zero():
@@ -74,7 +73,7 @@ def test_empty_port_becomes_the_default_not_zero():
         ("http://h:9000", ("h", 9000)),
         ("h:8888", ("h", 8888)),
         ("bare.example.com", ("bare.example.com", 80)),
-        ("https://h", ("h", 443)),  # an https URL with no port means 443
+        ("https://h", ("h", 443)),
     ],
 )
 def test_jupyter_accepts_pasted_urls(value, expected):
@@ -189,7 +188,6 @@ def test_only_the_relevant_secret_is_carried():
     assert spec.token == ""
 
 
-# --- secret hygiene --------------------------------------------------------
 
 
 @pytest.mark.parametrize("secret_field", ["key_passphrase", "token"])
@@ -235,7 +233,6 @@ def test_key_path_is_not_echoed_back():
     assert spec.redacted()["key_path"] == REDACTED
 
 
-# --- transport output bounds ----------------------------------------------
 
 
 def test_clip_keeps_the_tail_where_diagnostics_live():
@@ -250,11 +247,8 @@ def test_clip_leaves_short_output_alone():
     assert clip("hello", limit=100) == "hello"
 
 
-# --- detection -------------------------------------------------------------
 
 
-# Captured from the MI300X host on 2026-10-04, including the CPU agent that
-# rocminfo lists beside the GPU. The probe reports one line per GPU agent.
 GOOD_PROBE = """
 <<<os>>>Ubuntu 24.04.4 LTS
 <<<arch>>>x86_64
@@ -360,7 +354,6 @@ def test_probe_script_is_bounded_and_syntactically_valid():
     assert parsed.returncode == 0, parsed.stderr
 
 
-# --- orchestration ---------------------------------------------------------
 
 
 def _remote_replies(verify_ok: bool = True) -> FakeTransport:
@@ -504,7 +497,6 @@ def test_a_project_run_lands_under_the_transport_root(source_tree):
     assert any("/shared-docker/root/graft" in command for command in transport.commands)
 
 
-# --- verifying a selected source file on the GPU ---------------------------
 
 
 def test_verify_uploads_and_migrates_the_selected_file(source_tree):
@@ -653,7 +645,6 @@ def test_a_file_run_lands_under_the_transport_root():
     )
 
 
-# --- AI-converted file run + verification ---------------------------------
 
 
 _NO_GPU_PROBE = GOOD_PROBE.replace(
@@ -769,8 +760,6 @@ def test_a_missing_result_marker_is_handled(source_tree):
     transport = FakeTransport({"": CommandResult("run", 0, "connection lost", "")})
     run = remote_module.run_remote(transport, _spec(), source=source_tree)
     assert not run.ok
-    # Nothing was parsed, so nothing may be presented as a verification step;
-    # the raw transcript is kept under an explicit diagnostic name instead.
     assert "verify_hip" not in run.steps
     assert "pipeline" not in run.steps
     assert "connection lost" in run.steps["remote_script"]["output"]
@@ -838,7 +827,6 @@ def test_the_remote_script_emits_parsable_json(tmp_path):
         f"stderr: {completed.stderr!r}"
     )
     steps = payload["steps"]
-    # Both steps must be present: a missing key means a truncated JSON object.
     assert set(steps) == {"verify_hip", "pipeline"}
     assert steps["verify_hip"]["returncode"] == 0
     assert "HIP VERIFICATION PASSED" in steps["verify_hip"]["output"]
@@ -877,7 +865,6 @@ def test_spec_module_exposes_no_stray_helper():
     assert not hasattr(spec_module, "describe")
 
 
-# --- Jupyter transport details --------------------------------------------
 
 
 class TestJupyterUrlHandling:
@@ -901,8 +888,6 @@ class TestJupyterUrlHandling:
         assert (spec.scheme, spec.port) == (scheme, port)
 
     def test_ssh_has_no_scheme(self):
-        # SSH negotiates its own transport security; a scheme here would be
-        # meaningless and misleading.
         spec = parse_form({"kind": "ssh", "host": "203.0.113.5", "key_path": "/tmp/k"})
         assert spec.scheme == ""
 
@@ -1068,7 +1053,6 @@ class TestJupyterCommandDeadline:
 
         with pytest.raises(TransportError) as caught:
             transport._drive("1", "sleep 600", 5)
-        # The message has to be actionable: it names the budget and the fix.
         assert "timed out" in str(caught.value).lower()
         assert "5s" in str(caught.value)
         assert "command timeout" in str(caught.value).lower()
@@ -1084,7 +1068,6 @@ class TestJupyterCommandDeadline:
 
         transport._drive("1", "make", 30)
         assert len(socket_.timeouts) >= 4
-        # Each re-arm must shrink: the read budget follows the deadline down.
         assert socket_.timeouts == sorted(socket_.timeouts, reverse=True)
         assert all(value <= 30 for value in socket_.timeouts)
 
@@ -1101,7 +1084,6 @@ class TestJupyterCommandDeadline:
         )
         with pytest.raises(TransportError):
             transport._drive("1", "sleep 600", 0.2)
-        # It stopped because the clock ran out, not because the socket died.
         assert socket_.reads < 100
 
     def test_no_budget_still_gets_a_default(self):
@@ -1130,7 +1112,6 @@ class TestJupyterConnectRetry:
             {"kind": "jupyter", "host": "gpu.example.com", "token": "t"}
         )
         transport = jupyter.JupyterTransport(spec)
-        # Keep the backoff instant so the retry tests stay fast.
         monkeypatch.setattr(jupyter, "CONNECT_BACKOFF_S", 0)
         return transport
 
@@ -1148,7 +1129,6 @@ class TestJupyterConnectRetry:
         monkeypatch.setattr(transport.session, "request", flaky)
         response = transport._request("GET", "/api/status", what="status", timeout=5)
         assert response.ok
-        # The first attempt failed; the retry delivered the response.
         assert len(calls) == 2
 
     def test_a_persistent_connection_error_gives_up_after_the_retries(self, monkeypatch):
@@ -1165,7 +1145,6 @@ class TestJupyterConnectRetry:
         with pytest.raises(TransportError) as caught:
             transport._request("GET", "/api/status", what="status", timeout=5)
         assert "Could not reach" in str(caught.value)
-        # Exactly the configured number of attempts, no more.
         assert len(calls) == jupyter.CONNECT_RETRIES
 
     def test_a_read_timeout_is_not_retried(self, monkeypatch):
@@ -1180,7 +1159,6 @@ class TestJupyterConnectRetry:
         monkeypatch.setattr(transport.session, "request", stalled)
         with pytest.raises(TransportError) as caught:
             transport._request("GET", "/api/status", what="status", timeout=5)
-        # A stalled request has its own budget; repeating it only makes it slower.
         assert "Timed out" in str(caught.value)
         assert len(calls) == 1
 
@@ -1255,7 +1233,6 @@ class TestJupyterTerminalFraming:
     def test_terminal_control_sequences_are_stripped(self):
         from graft.target.jupyter import _decode_frame
 
-        # Bracketed-paste toggles and a window-title OSC, as a PTY emits them.
         noisy = "\x1b[?2004hused=42\x1b]0;title\x07\r\n"
         assert _decode_frame(_stdout(noisy)) == "used=42\r\n"
 
@@ -1511,11 +1488,9 @@ class TestUnpackDiagnosis:
         message = _unpack_hint(
             self._failed("tar: graft/x: Cannot open: Permission denied"), spec
         )
-        # Permission denied is not a path mismatch, so no misleading hint.
         assert "root directory" not in message
 
 
-# --- dependencies -----------------------------------------------------------
 
 
 def _deps_facts(**overrides):
@@ -1553,7 +1528,6 @@ class TestDependencyScan:
 
         facts = _deps_facts(torch_version="")
         assert [dep.key for dep in actionable_dependencies(facts)] == ["torch"]
-        # PyTorch is optional, so it is not a blocking gap.
         assert missing_dependencies(facts) == []
 
     def test_torch_install_uses_the_rocm_wheel_index(self):
@@ -1571,31 +1545,24 @@ class TestDependencyScan:
         torch = next(
             dep for dep in scan_dependencies(_deps_facts()) if dep.key == "torch"
         )
-        # A bare image has python3 but no pip, so pip has to be installed first.
         assert "apt-get install -y python3-pip" in torch.command
         assert torch.command.index("python3-pip") < torch.command.index("pip3 install")
         assert "pip3 install" in torch.command
         assert "torch torchvision" in torch.command
-        # Ubuntu 24.04 marks the system Python externally managed, so pip needs
-        # the PEP 668 override or it refuses to install anything at all.
         assert "--break-system-packages" in torch.command
 
     def test_pip_break_flag_is_added_only_where_pep_668_is_enforced(self):
         from graft.target.dependencies import _torch_command
 
-        # Ubuntu 24.04: externally managed, flag required.
         assert "--break-system-packages" in _torch_command(
             _deps_facts(os_name="Ubuntu 24.04.5 LTS")
         )[0]
-        # Ubuntu 22.04 ships pip 22, which rejects the flag.
         assert "--break-system-packages" not in _torch_command(
             _deps_facts(os_name="Ubuntu 22.04.5 LTS")
         )[0]
-        # Debian 12 is the first Debian trunk that enforces PEP 668.
         assert "--break-system-packages" in _torch_command(
             _deps_facts(os_name="Debian GNU/Linux 12 (bookworm)")
         )[0]
-        # Debian 11 does not.
         assert "--break-system-packages" not in _torch_command(
             _deps_facts(os_name="Debian GNU/Linux 11 (bullseye)")
         )[0]
@@ -1603,8 +1570,6 @@ class TestDependencyScan:
     def test_torch_install_prefers_pytorch_own_rocm_series(self):
         from graft.target.dependencies import scan_dependencies
 
-        # A host can carry two ROCm stacks; the wheel that works is the one
-        # matching the PyTorch already on the box, not the first /opt/rocm dir.
         facts = _deps_facts(rocm_version="10.1.0", torch_hip="7.14.60850")
         torch = next(dep for dep in scan_dependencies(facts) if dep.key == "torch")
         assert "https://download.pytorch.org/whl/rocm7.14" in torch.command
@@ -1635,7 +1600,6 @@ class TestDependencyScan:
 
 
 
-# --- metrics ----------------------------------------------------------------
 
 
 class TestMetrics:
@@ -1669,7 +1633,6 @@ class TestMetrics:
         assert "while :" not in command
         assert "mem_info_vram_used" in command
         assert "df -P -B1" in command
-        # The sensor node names differ per card, so both families are globbed.
         assert "temp*_input" in command
         assert "power1_input" in command
 
@@ -1696,10 +1659,6 @@ class TestMetrics:
 
 
 
-# --- local target ------------------------------------------------------------
-# A local machine is described by the same TargetFacts shape and installs
-# through the same fixed command table as a remote one, so the workspace's
-# dependency overlay has one code path rather than two.
 
 
 class TestLocalTarget:
@@ -1709,7 +1668,7 @@ class TestLocalTarget:
 
         facts = TargetFacts(**local_target_facts())
         assert facts.ok is True
-        assert facts.python_path  # the running interpreter, always present
+        assert facts.python_path
         assert isinstance(facts.tools, dict)
 
     def test_local_transport_runs_a_command_here(self):
@@ -1755,8 +1714,6 @@ class TestLocalSysfsMetrics:
         real_glob = metrics_module.glob.glob
 
         def fake_glob(pattern: str):
-            # Point the one sysfs root the reader walks at a fake card; every
-            # other pattern is already an absolute path under tmp_path.
             if pattern.startswith("/sys/class/drm/"):
                 return [str(card)] if pattern == "/sys/class/drm/card*/device" else []
             return real_glob(pattern)

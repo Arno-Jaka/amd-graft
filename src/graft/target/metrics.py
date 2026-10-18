@@ -20,10 +20,6 @@ from typing import Any
 
 SENTINEL = "__GRAFT_METRICS_END__"
 
-# One snapshot as a shell script. Kept free of `set -e` so a missing sysfs
-# node skips one field instead of aborting the whole reading. Sensor names
-# differ by card (temp1/temp2, power1_input/power1_average), so each family is
-# globbed and the highest reading is kept.
 _SAMPLE = r"""
 emit() { printf '%s=%s\n' "$1" "$2"; }
 total=0
@@ -214,22 +210,14 @@ def local_snapshot() -> MetricsSnapshot:
         import torch
 
         if torch.cuda.is_available():
-            # torch is the authority for the GPU name, count, and the VRAM a
-            # ROCm process may actually use (reservations, other processes);
-            # sysfs below is the authority for utilization and sensors.
             fields["gpu_name"] = str(torch.cuda.get_device_name(0))
             fields["gpu_count"] = str(torch.cuda.device_count())
             free, total = torch.cuda.mem_get_info(0)
             fields["vram_total_bytes"] = str(int(total))
             fields["vram_used_bytes"] = str(int(total - free))
     except Exception:
-        # A missing or unusable torch is expected on a CPU-only workstation;
-        # disk and sysfs still work, so report what can be measured.
         pass
     sysfs_fields = _local_sysfs_fields()
-    # sysfs reports the card's own totals. They are only used when torch could
-    # not provide a live reading, so a measured value is never replaced by a
-    # less precise one.
     if "vram_total_bytes" not in fields:
         fields.update({k: v for k, v in sysfs_fields.items() if k.startswith("vram_")})
     for key, value in sysfs_fields.items():

@@ -58,8 +58,6 @@ def summarize(result: pipeline.PipelineResult) -> dict[str, Any]:
         "parity": _parity(inputs.parity),
         "benchmarks": _benchmarks(inputs.benchmarks),
         "narrative": _narrative(inputs.narratives),
-        # The ported source itself, so a UI can show the original next to the
-        # conversion. Empty (not missing) when the pipeline skipped migration.
         "converted_source": _converted_source(inputs),
     }
 
@@ -95,8 +93,6 @@ def _conversion(inputs) -> dict[str, Any]:
     return {
         "measured": True,
         "verdict": str(verdict),
-        # The basis strings are computed by the report module rather than
-        # reworded here, so the page and the Markdown report cannot drift.
         "verdict_line": report._verdict_line(verdict),
         "verdict_basis": report._verdict_basis(migration, parity),
         "route": _text(getattr(migration.route, "lang", None), "unknown"),
@@ -109,8 +105,6 @@ def _conversion(inputs) -> dict[str, Any]:
             }
             for change in migration.changes
         ],
-        # Read from the structured form (unmapped), not coverage.findings:
-        # that field holds human-readable strings, not Finding objects.
         "findings": report.coverage_findings(migration),
     }
 
@@ -158,7 +152,6 @@ def _benchmarks(rows: list[dict] | None) -> list[dict[str, Any]]:
     return out
 
 
-# Key order is the order the report renders them in.
 NARRATIVE_TITLES = {
     "narration": "Summary",
     "parity_explainer": "Parity, explained",

@@ -241,19 +241,12 @@ def run(
     inputs.telemetry_snapshot = telemetry.device_snapshot()
     device = device or config.resolve_device()
 
-    # Import the original first. That import both proves the file is loadable
-    # and lets anything it prints on import be captured and forwarded, which
-    # is the stream contract the worker relies on.
     try:
         original_module = load_module(path)
     except Exception as exc:
         skipped.append(f"module not importable: {type(exc).__name__}: {exc}")
         original_module = None
 
-    # Parity and benchmarks must judge the port, not the input. Prefer the
-    # ported module; fall back to the original only when the route produced
-    # no importable Python, where the original is all there is and the report
-    # already carries the "not a port" caveats.
     ported_module, produced = _load_ported(inputs.migration, path, skipped)
     module = ported_module if produced else original_module
 
@@ -485,7 +478,7 @@ def _narrative(inputs: report.ReportInputs) -> dict[str, str]:
     """
     try:
         from graft.agent import agent as agent_module
-    except Exception as exc:  # agent layer absent or broken
+    except Exception as exc:
         reason = f"not available: agent layer could not be imported ({exc})"
         return {
             "narration": reason,

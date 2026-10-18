@@ -34,9 +34,6 @@ class Route:
 
 
 CUDA_API_RE = re.compile(r"torch\.cuda\.(\w+)")
-# PTX is identified by instruction mnemonics and special registers, not by
-# the asm( syntax: real CUDA emits asm volatile("..."), and PyTorch kernels
-# carry PTX in plain strings. Both must be caught.
 PTX_RE = re.compile(
     r"asm\s+(?:volatile\s*)?\(|"
     r"%laneid|%ctaid|%tid|"
@@ -67,10 +64,6 @@ def detect(path: Path | None, source: str) -> Route:
     suffix_is_cpp = path is not None and path.suffix.lower() in CPP_SUFFIXES
     content_is_cpp = any(marker in source for marker in CUDA_CPP_MARKERS)
 
-    # Extension is not sufficient on its own: pasted snippets arrive with no
-    # path, and a .py wrapper can still contain raw CUDA. Content wins when
-    # the two disagree, because compiling the wrong route wastes more time
-    # than a misclassification here.
     if (suffix_is_cpp and not TRITON_RE.search(source)) or content_is_cpp:
         route.lang = Lang.CUDA_CPP
     elif TRITON_RE.search(source):

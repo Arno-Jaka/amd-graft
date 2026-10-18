@@ -43,10 +43,6 @@ def local_capability() -> dict[str, Any]:
         return {}
 
 
-# Tools Graft's pipeline shells out to. The remote probe searches the ROCm
-# install layout as well as PATH because a non-login shell routinely misses a
-# versioned bin directory; the same is true locally, so the same layout is
-# searched here rather than trusting shutil.which alone.
 _TOOLS = ("hipcc", "hipify-perl", "hipify-clang", "nvcc", "rocminfo", "rocm-smi")
 _TOOL_DIRS = (
     "/opt/rocm/bin",

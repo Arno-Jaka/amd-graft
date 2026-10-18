@@ -60,8 +60,6 @@ class CudaApiVisitor(ast.NodeVisitor):
 class IndexNormalizer(ast.NodeTransformer):
     def __init__(self, log: RewriteLog) -> None:
         self.log = log
-        # Set when a hardcoded index is replaced, so rewrite() knows whether
-        # the GPU_DEVICE_INDEX import has to be ensured.
         self.used_gpu_index = False
 
     def visit_Call(self, node: ast.Call) -> ast.Call:
@@ -75,8 +73,6 @@ class IndexNormalizer(ast.NodeTransformer):
         ):
             return node
 
-        # torch.device("cuda", 0) puts the device string first and the
-        # index second, so the literal to normalize is args[1].
         if len(node.args) < 2:
             return node
 

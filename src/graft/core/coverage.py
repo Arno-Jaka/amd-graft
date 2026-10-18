@@ -34,7 +34,6 @@ class Severity(StrEnum):
     INFO = "info"
 
 
-# Cap each verdict by the worst severity present. Lower wins.
 _SEVERITY_CAP = {
     Severity.BLOCKER: "manual_port",
     Severity.REVIEW: "needs_review",
@@ -79,8 +78,6 @@ class Finding:
         )
 
 
-# Ordered so that BLOCKER patterns are tested and reported first within a
-# category; each entry is independent.
 _BLOCKERS: tuple[tuple[str, str, str, str], ...] = (
     (
         "ptx",
@@ -226,7 +223,6 @@ def verdict_for(findings: list[Finding], fallback: str = "production_ready") -> 
     worst = fallback
     for finding in findings:
         cap = _SEVERITY_CAP[finding.severity]
-        # Verdict ordering: manual_port > needs_review > production_ready.
         if cap == "manual_port" or (cap == "needs_review" and worst != "manual_port"):
             worst = cap
     return worst

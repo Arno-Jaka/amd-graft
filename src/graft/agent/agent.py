@@ -35,8 +35,6 @@ from . import prompts
 
 NOT_AVAILABLE = "not available"
 
-# Applied to every prompt. The model proposes; the deterministic layers
-# decide. Without this the model will happily invent a correctness claim.
 GUARDRAIL = prompts.SYSTEM
 
 
@@ -70,8 +68,6 @@ def unavailable_reason() -> str:
     return ""
 
 
-# Set when the Gemma client cannot even be constructed, so the failure can
-# be explained instead of surfacing as an empty section.
 _model_error: str | None = None
 
 
@@ -91,7 +87,7 @@ def build_model():
 
     try:
         from .gemma import GemmaModel
-    except Exception as exc:  # pragma: no cover - gemma.py is stdlib-only
+    except Exception as exc:
         _model_error = f"gemma client unavailable: {exc}"
         return None
 
@@ -172,12 +168,12 @@ def _run(agent, prompt: str, timeout: float | None = None) -> str:
                 response = pool.submit(agent.run, prompt).result(timeout=timeout)
             except FutureTimeout:
                 return f"{NOT_AVAILABLE}: timed out after {timeout:.0f}s"
-            except Exception as exc:  # every failure becomes text
+            except Exception as exc:
                 return f"{NOT_AVAILABLE}: {type(exc).__name__}: {exc}"
     else:
         try:
             response = agent.run(prompt)
-        except Exception as exc:  # every failure becomes text, never propagates
+        except Exception as exc:
             return f"{NOT_AVAILABLE}: {type(exc).__name__}: {exc}"
 
     content = getattr(response, "content", None)
@@ -269,9 +265,6 @@ def summarize_benchmark(rows: list[dict], noise_band: float, agent=None) -> str:
     """Explain benchmark numbers and what they do not show."""
 
     def _headline(row: dict) -> str:
-        # Rows come straight from bench.compare_* and are keyed by ratio or
-        # speedup, never "result". Reading a missing key would print
-        # "not available" next to a real number already in the row.
         for key in ("ratio", "speedup"):
             if row.get(key) is not None:
                 return f"{key} {row[key]}"

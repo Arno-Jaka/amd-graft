@@ -62,9 +62,6 @@ def compare(expected, actual, dtype):
         denom = expected[comparable].abs().clamp_min(atol)
         max_rel = (finite / denom).max().item()
 
-    # equal_nan=True makes NaN agree with NaN position by position, so a
-    # port that introduces NaN where the reference has a real number still
-    # fails. No separate NaN-mask comparison is needed or correct here.
     within = torch.allclose(expected, actual, rtol=rtol, atol=atol, equal_nan=True)
     return bool(within), max_abs, max_rel, ""
 

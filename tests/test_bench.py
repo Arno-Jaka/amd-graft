@@ -47,7 +47,6 @@ def _fake(label: str, median_ms: float) -> bench.BenchResult:
     return r
 
 
-# --- timing mechanics -----------------------------------------------------
 
 
 def test_returns_exactly_iters_samples(tensor):
@@ -91,11 +90,6 @@ def test_sync_is_a_noop_on_cpu():
     assert bench.sync(CPU) is None
 
 
-# --- clock settling --------------------------------------------------------
-#
-# Measured on an MI300X: boost clocks need ~1000 calls to ramp, and the card
-# runs ~7% slower until they do. These tests pin the mechanism that stops
-# that ramp leaking into a comparison as a phantom regression.
 
 
 def test_settle_stops_once_the_window_flattens(monkeypatch):
@@ -165,7 +159,7 @@ def test_settle_respects_the_time_budget(monkeypatch):
 
     def fake_time(fn, arg, device, iters):
         calls["n"] += 1
-        return [1.0 - calls["n"] * 0.1]  # never settles on its own
+        return [1.0 - calls["n"] * 0.1]
 
     monkeypatch.setattr(bench, "_time", fake_time)
     used = bench.settle(
@@ -220,7 +214,7 @@ def test_settle_runs_for_accelerators(monkeypatch, tensor):
     monkeypatch.setattr(bench, "settle", fake_settle)
     bench.time_kernel(counting, tensor, fake_cuda, warmup=2, iters=3)
     assert settled["batches"] == 1
-    assert calls["n"] == 6  # 2 warmup + 1 settle call + 3 measured
+    assert calls["n"] == 6
 
 
 def test_benchresult_reports_expected_fields(tensor):
@@ -241,7 +235,6 @@ def test_percentile_handles_single_sample():
     assert bench._percentile([4.2], 0.90) == 4.2
 
 
-# --- comparators must be able to detect a regression ----------------------
 
 
 def test_comparator_detects_a_significant_regression():

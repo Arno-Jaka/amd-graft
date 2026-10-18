@@ -157,9 +157,6 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
-# `serve` and `tui` are the same command: the terminal UI is what runs on the
-# machine, so there is no separate server process to start. `serve` is the
-# name the installer and docs point at; `tui` remains a working alias.
 COMMANDS = {
     "migrate": cmd_migrate,
     "serve": cmd_tui,
@@ -174,5 +171,5 @@ def main(argv: list[str] | None = None) -> int:
     return COMMANDS[args.command](args)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

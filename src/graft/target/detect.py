@@ -14,8 +14,6 @@ from typing import Any
 
 from graft.target.transport import CommandResult, TransportError
 
-# Probes are cheap and independent, so they are issued as one script and
-# marked rather than run one at a time. Each prints "<<<KEY>>>value".
 PROBE_SCRIPT = r"""
 set +e
 emit() { printf '<<<%s>>>%s\n' "$1" "$2"; }
@@ -165,9 +163,6 @@ emit torch_hip "$(if [ -n "$pybin" ]; then "$pybin" -c 'import torch;print(getat
 """
 
 
-# How much of the raw probe output is kept for the diagnostics panel. The
-# tail matters more than the head: the interesting lines are the last ones a
-# broken toolchain printed.
 MAX_RAW_CHARS = 4000
 
 
@@ -206,8 +201,6 @@ class TargetFacts:
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        # The raw transcript can be long and may echo an environment; it is
-        # kept for debugging but trimmed for anything user-facing.
         data["raw"] = self.raw[-MAX_RAW_CHARS:]
         return data
 
@@ -249,9 +242,6 @@ def _as_int(value: str | None) -> int:
         return 0
 
 
-# rocm-smi has reported VRAM both as a bare byte count and as a suffixed value
-# depending on the release. A byte count read as MB turns a 192 GB card into
-# "205 petabytes", which is worse than reporting nothing.
 _MEMORY_UNITS = {
     "b": 1,
     "k": 1024,
@@ -324,27 +314,17 @@ def detect(transport) -> TargetFacts:
         if name.startswith("tool_")
     }
 
-    # A CPU-only host can still translate CUDA to HIP, because hipify-perl is
-    # a text rewriter and hipcc cross-compiles without a device present. Only
-    # running kernels needs a GPU, so a missing one is a note, not a failure.
     agents = parse_gpu_agents(fields.get("agents", ""))
     if agents:
         gpu_count = len(agents)
         gpu_name = agents[0][0]
         gfx_arch = next((gfx for _, gfx in agents if gfx), "")
     else:
-        # KFD exposes one node per GPU device, and only GPU nodes carry a
-        # gfx_target_version property.
         gpu_count = _as_int(fields.get("kfd_gpus"))
         gpu_name = ""
         gfx_arch = ""
     vram_mb = _to_mb(fields.get("vram"))
     if not gpu_count:
-        # rocm-smi reports a total independent of whether any GPU agent was
-        # found, so a host with no visible device still yields a plausible
-        # byte count. "0 GPUs, 192 GB of VRAM" is a self-contradiction, and a
-        # reader skimming the panel would take the VRAM as proof a card is
-        # there. With no device there is no VRAM to report.
         if vram_mb:
             notes.append(
                 f"Ignored a reported {vram_mb} MB VRAM figure: no GPU device is "
@@ -386,7 +366,6 @@ def detect(transport) -> TargetFacts:
     torch_version = fields.get("torch", "")
     torch_gpu = ""
     if torch_version:
-        # torch_version carries "<version>|<device>" from the inline probe.
         raw_version, _, torch_gpu = torch_version.partition("|")
         torch_version = raw_version.strip()
         if torch_gpu and "not available" in torch_gpu.lower():

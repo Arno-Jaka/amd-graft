@@ -19,10 +19,6 @@ import torch
 
 from graft import config
 
-# Verdict thresholds live in config so the report, UI, and this module
-# all quote the same numbers. They are calibrated against measured noise:
-# identical kernels vary by several percent run to run on shared hardware,
-# so a naive 5% band would report regressions that do not exist.
 NOISE_BAND = config.BENCH_NOISE_BAND
 SIGNIFICANT_BAND = config.BENCH_SIGNIFICANT_BAND
 
@@ -97,9 +93,6 @@ def time_kernel(
         fn(arg)
     sync(device)
 
-    # Only for accelerators, and only when the kernel is long enough that
-    # a few hundred extra calls are affordable. CPU timing has no clock
-    # ramp, so it keeps its exact fixed-warmup behaviour.
     if config.BENCH_SETTLE and device.type != "cpu" and iters:
         settle(fn, arg, device)
 

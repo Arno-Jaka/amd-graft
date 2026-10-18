@@ -33,7 +33,6 @@ def small_cases():
     return cases.generate()[:3]
 
 
-# --- happy path -----------------------------------------------------------
 
 
 def test_runs_the_shipped_example(small_cases):
@@ -51,12 +50,9 @@ def test_runs_the_shipped_example(small_cases):
     assert all(entry["ok"] for entry in result.results)
 
     for entry, case in zip(result.results, small_cases, strict=True):
-        # Output survives as a real CPU tensor...
         assert isinstance(entry["output"], torch.Tensor)
         assert entry["output"].device.type == "cpu"
-        # ...with the input's shape...
         assert tuple(entry["output"].shape) == tuple(case["input"].shape)
-        # ...and the right numbers. Running is not the same as being correct.
         expected = torch.softmax(case["input"], dim=-1)
         torch.testing.assert_close(entry["output"], expected)
 
@@ -74,7 +70,6 @@ def test_empty_case_list_is_not_a_failure():
     assert result.case_count == 0
 
 
-# --- user code that misbehaves stays data, not a harness crash ------------
 
 
 def test_syntax_error_is_reported(small_cases):
@@ -110,8 +105,6 @@ def test_wrong_answer_is_not_reported_as_success():
         "def solve(x): return torch.softmax(x, dim=-1) * 2.0\n"
     )
     result = runner.run_cases(source, cases.generate()[:2])
-    # Execution succeeded; the numbers are wrong. That distinction is the
-    # point, so this asserts the runner does not conflate the two.
     assert result.ok
     outputs = [entry["output"] for entry in result.results]
     for output in outputs:
@@ -141,7 +134,6 @@ def test_case_names_are_preserved(small_cases):
     ]
 
 
-# --- containment ----------------------------------------------------------
 
 
 SPINNER = "OPERATION='softmax'\ndef solve(x):\n    while True: pass\n"

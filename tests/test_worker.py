@@ -49,8 +49,6 @@ class TestWorker:
         assert json.loads(completed.stdout)["ok"] is False
 
     def test_reports_pipeline_failure_instead_of_crashing(self):
-        # A module that cannot be imported is an outcome the report
-        # describes, not an exception the worker should die on.
         completed = self._run(
             {"source": "import nonexistent_zzz\n", "filename": "x.py"}
         )
@@ -72,9 +70,6 @@ class TestWorker:
         assert payload["summary"]["parity"]["passed"] == 40
 
     def test_worker_output_is_pure_json(self):
-        # The parent parses stdout directly, so anything the analysed file
-        # prints would corrupt the response. The pipeline imports that file
-        # in this process, so its output has to be diverted to stderr.
         completed = self._run(
             {
                 "source": "print('noise from the analysed file')\n"
@@ -88,10 +83,6 @@ class TestWorker:
         assert "noise from the analysed file" not in completed.stdout
 
     def test_worker_truncates_large_output(self):
-        # A file that prints far more than the limit has its output clipped,
-        # with a note saying so. Kept finite on purpose: an unbounded print
-        # loop would fill the pipe this test reads, which is a good way to
-        # take down the machine running the tests.
         completed = self._run(
             {
                 "source": "print('y' * 40000)\n"

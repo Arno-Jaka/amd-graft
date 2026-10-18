@@ -21,21 +21,14 @@ from graft.target.transport import (
     quote,
 )
 
-# paramiko raises a wide tree of its own errors; catching Exception here is
-# deliberate because every one of them means the same thing to the caller,
-# and none of them carry the passphrase.
 try:
     import paramiko
-except ImportError:  # pragma: no cover - exercised by absence, not by test
+except ImportError:
     paramiko = None
 
 CONNECT_TIMEOUT_S = 20
 BANNER_TIMEOUT_S = 30
 AUTH_TIMEOUT_S = 30
-# A live stream only notices a target that vanished silently (deleted instance,
-# dropped route) through the transport's own keepalives. One interval with no
-# reply closes the transport, so a dead peer is caught within roughly twice
-# this value instead of hanging until the kernel gives up.
 KEEPALIVE_S = 10
 
 
@@ -43,7 +36,7 @@ class SSHTransport:
     """An SSH connection to a target, kept open for the life of one request."""
 
     def __init__(self, spec: TargetSpec) -> None:
-        if paramiko is None:  # pragma: no cover
+        if paramiko is None:
             raise TransportError(
                 "SSH support needs the paramiko package. Install it with "
                 "'pip install paramiko', or use the Jupyter option instead."
@@ -51,7 +44,6 @@ class SSHTransport:
         self.spec = spec
         self._client: paramiko.SSHClient | None = None
 
-    # -- lifecycle --------------------------------------------------------
 
     def _auth_kwargs(self) -> dict:
         """Build auth arguments, without ever logging them."""
@@ -62,19 +54,9 @@ class SSHTransport:
             "timeout": CONNECT_TIMEOUT_S,
             "banner_timeout": BANNER_TIMEOUT_S,
             "auth_timeout": AUTH_TIMEOUT_S,
-            # Both agent and ~/.ssh key scanning are off. The operator named
-            # one key explicitly, and borrowing a standing local credential
-            # would contradict the promise that nothing is retained.
             "allow_agent": False,
-            # Without this, paramiko reads ~/.ssh/known_hosts and refuses
-            # unknown keys. A cloud instance gets a fresh host key on every
-            # boot, so TOFU is the only workable policy here. The host key is
-            # still checked against the one the server presents, which stops
-            # a downgrade, just not a first-use MITM.
             "look_for_keys": False,
         }
-        # The form suggests ~/.ssh/id_ed25519, so honour it: Path() does not
-        # expand a leading tilde and the file would look missing.
         kwargs["key_filename"] = str(_expand(self.spec.key_path))
         if self.spec.key_passphrase:
             kwargs["passphrase"] = self.spec.key_passphrase
@@ -146,7 +128,6 @@ class SSHTransport:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
-    # -- work -------------------------------------------------------------
 
     def run(
         self,
@@ -202,8 +183,6 @@ class SSHTransport:
                 f"{error.strerror or error}"
             ) from error
         channel = stdout.channel
-        # A one-second read timeout lets the loop notice `stop` promptly while
-        # a quiet GPU is simply waiting for its next line.
         channel.settimeout(1.0)
         buffer = ""
         try:
@@ -218,9 +197,6 @@ class SSHTransport:
                         f"{error.strerror or error}"
                     ) from error
                 if not chunk:
-                    # The stream command loops forever, so an EOF is the target
-                    # hanging up, not the command finishing. Report it as a lost
-                    # connection rather than letting the last reading stand.
                     if stop.is_set():
                         break
                     raise TransportError(

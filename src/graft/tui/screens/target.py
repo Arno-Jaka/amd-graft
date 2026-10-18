@@ -49,9 +49,6 @@ from graft.tui.screens.results import ResultsScreen
 from graft.tui.screens.tips import classify_connection_failure
 from graft.tui.widgets import GPUMetrics, GPUStatusPanel
 
-# Shown with an SSH target's detection result. SSH runs on the host, so a GPU
-# image that keeps PyTorch/ROCm inside a container looks empty here even though
-# the hardware works; pointing at the Jupyter option saves the confusion.
 SSH_TORCH_DISCLAIMER = (
     "Note: SSH checks the host, not any container running on it. If this image "
     "keeps PyTorch/ROCm inside a container (e.g. a “rocm” container), Graft "
@@ -68,33 +65,17 @@ def _field(label: str, control: Input) -> ComposeResult:
 class TargetScreen(Vertical):
     """Run a local migration or check and verify a remote GPU target."""
 
-    # Seconds to wait before each automatic reconnect attempt after a live
-    # connection drops. Three tries, spaced out: a brief network blip is ridden
-    # out, while a genuinely gone host is not hammered hard enough to trip
-    # fail2ban. A manual "Reconnect" is always available.
     RECONNECT_BACKOFF_S: ClassVar[tuple[int, ...]] = (5, 20, 60)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._converted_source = ""
         self._converted_filename = ""
-        # Whether the converted file currently held came from a run that
-        # actually succeeded. The upload button is gated on this, not merely on
-        # a file being present, so nothing unverified can be pushed to a GPU.
         self._converted_verified = False
-        # The source chosen for a remote verify run, kept so the results screen
-        # can render the original next to the remote conversion.
         self._verify_original_source = ""
         self._verify_source_path = ""
         self._preview_timer: Timer | None = None
-        # The last successful remote connection, kept so the dependency scan
-        # and the live metrics can re-open the same target without the user
-        # retyping (or re-pasting a token) the form. It survives a dropped
-        # connection so the reconnect flow can reuse it.
         self._connected_fields: dict[str, Any] | None = None
-        # Capabilities from the last *live* connection. None means the target
-        # is not currently reachable, which is what gates the reconnect button
-        # and hides the install button.
         self._connected_facts: dict[str, Any] | None = None
         self._pending_fields: dict[str, Any] | None = None
         self._metrics_stop: threading.Event | None = None
@@ -102,8 +83,6 @@ class TargetScreen(Vertical):
         self._reconnect_attempts = 0
         self._reconnect_timer: Timer | None = None
         self._operation_active = False
-        # The Gemma endpoint captured from the form when a migration starts;
-        # reused by the results screen for the "convert with Gemma" action.
         self._ai_options: dict[str, str] = {}
 
     _LOGO = r""" ________    ________     ________    ________   _________
@@ -112,7 +91,7 @@ class TargetScreen(Vertical):
   \ \  \  ___ \ \   _  _\  \ \   __  \ \ \   __\      \ \  \
    \ \  \|\  \ \ \  \\  \|  \ \  \ \  \ \ \  \_|       \ \  \
     \ \_______\ \ \__\\ _\   \ \__\ \__\ \ \__\         \ \__\
-     \|_______|  \|__|\|__|   \|__|\|__|  \|__|          \|__| V1.0.0 | powered by AMD"""
+     \|_______|  \|__|\|__|   \|__|\|__|  \|__|          \|__| V1.0.0 | powered by AMD X Google Gemma"""
     _COMPACT_LOGO = "╭─┬─┬─┬─┬─╮\n│G│R│A│F│T│\n╰─┴─┴─┴─┴─╯"
 
     def compose(self) -> ComposeResult:
@@ -337,12 +316,8 @@ class TargetScreen(Vertical):
 
     def on_mount(self) -> None:
         self._sync_target_controls()
-        # is_mounted is False inside on_mount, so defer the style-only
-        # updates until after the first refresh.
         self.call_after_refresh(self._apply_layout)
         self.call_after_refresh(self._refresh_reconnect_button)
-        # The workspace opens on the local machine, so its readings are the
-        # first thing the panel can show without any connection.
         self._start_metrics("local")
 
     def on_unmount(self) -> None:
@@ -392,8 +367,6 @@ class TargetScreen(Vertical):
         elif event.input.id == "source-path":
             if self._preview_timer is not None:
                 self._preview_timer.stop()
-            # Avoid reading the disk on every keystroke; pasted and selected
-            # paths still preview automatically once the user pauses.
             path_text = event.input.value
             self._invalidate_converted_file()
             self._preview_timer = self.set_timer(
@@ -581,15 +554,10 @@ class TargetScreen(Vertical):
             self._show_error("The source file is empty.")
             return
 
-        # Blank key means "use Graft's built-in Gemma key"; the pipeline falls
-        # back to config.LLM_API_KEY when the option is empty. The AI report is
-        # always requested so the section is populated on every conversion.
         self._ai_options: dict[str, str] = self._ai_options_from_form()
         options: dict[str, Any] = {
             "run_parity": True,
             "run_bench": True,
-            # The explicit Gemma endpoint owns this run's one or two model
-            # calls; do not also invoke an ambient environment-configured model.
             "with_narrative": False,
             "ai_review": dict(self._ai_options),
         }
@@ -655,8 +623,6 @@ class TargetScreen(Vertical):
         options: dict[str, Any],
     ) -> None:
         try:
-            # Reuse the same child-process boundary as the browser UI. The
-            # analyzed module never imports into the long-lived TUI process.
             from graft.worker import run_worker
 
             summary = run_worker(
@@ -696,9 +662,6 @@ class TargetScreen(Vertical):
             if blocking:
                 self._show_dependency_block("Remote verification", blocking)
                 return
-            # Verify the file chosen in the app so the report and the source
-            # comparison describe the operator's own code. With no file chosen,
-            # fall back to Graft's bundled example as a toolchain check.
             selected = self._selected_source_file()
             if selected is None:
                 return
@@ -998,9 +961,6 @@ class TargetScreen(Vertical):
                 )
             data = result.as_dict()
             if mode == "verify" and run_file is not None and data.get("summary"):
-                # The run was measured on the GPU but never called the model, so
-                # review it here. The provider key stays on this machine; only
-                # the evidence projection crossed the wire.
                 from graft import pipeline
 
                 summary = data["summary"]
@@ -1020,8 +980,6 @@ class TargetScreen(Vertical):
         except (TargetError, TransportError, ValueError) as exc:
             self.app.call_from_thread(self._remote_done, None, mode, str(exc))
         except Exception:
-            # Connection libraries can include request details in arbitrary
-            # exceptions, so keep their contents out of the terminal UI.
             self.app.call_from_thread(
                 self._remote_done,
                 None,
@@ -1134,9 +1092,6 @@ class TargetScreen(Vertical):
                 tone="success" if facts.get("gpu") else "info",
             )
             self.app.query_one("#results-view", ResultsScreen).show_local_probe(facts)
-            # A local machine is a target too: check it for the tools the
-            # pipeline needs the moment it is inspected and report what's
-            # missing. No auto-install is offered.
             try:
                 from graft.target.local import local_target_facts
 
@@ -1154,18 +1109,10 @@ class TargetScreen(Vertical):
     def _remote_done(
         self, result: dict[str, Any] | None, mode: str, error: str
     ) -> None:
-        # Passwords and tokens are request-only. Clear them even after a failed
-        # attempt so they do not remain visible in the form after completion.
         self.query_one("#ssh-passphrase", Input).value = ""
         self.query_one("#jupyter-token", Input).value = ""
         if mode == "verify":
-            # The Gemma key is likewise request-only for the locally generated
-            # review.
             self.query_one("#ai-api-key", Input).value = ""
-            # Every new verification re-decides whether there is a converted
-            # file worth uploading. Clear it first so a run that fails, or one
-            # that only checked the bundled example, cannot leave the button
-            # armed with a result nobody verified.
             self._set_converted_file("", "", verified=False)
         if error or result is None:
             self._gpu_status("set_disconnected", "TARGET CONNECTION FAILED")
@@ -1175,8 +1122,6 @@ class TargetScreen(Vertical):
                 "Remote request failed", message
             )
             self._pending_fields = None
-            # The target is not live, even if a previous connection worked, so
-            # the reconnect button becomes available.
             self._connected_facts = None
             self._refresh_reconnect_button()
             self._maybe_show_tips(message)
@@ -1187,8 +1132,6 @@ class TargetScreen(Vertical):
             self._pending_fields = None
             self._gpu_status("set_target_facts", result.get("facts"))
             if mode == "verify":
-                # Only a verification that completed with a measured summary
-                # arms the upload button; anything else leaves it cleared.
                 summary = result.get("summary") or {}
                 self._set_converted_file(
                     str(summary.get("converted_source") or ""),
@@ -1206,7 +1149,6 @@ class TargetScreen(Vertical):
                 f"Remote {label} complete · target {state}",
                 tone="success" if result.get("ok") else "warning",
             )
-            # Report what's missing rather than prompting an auto-install.
             if mode == "probe" and self._has_missing_dependencies(
                 self._connected_facts
             ):
@@ -1230,9 +1172,6 @@ class TargetScreen(Vertical):
                 else:
                     results.show_remote_file(result)
             elif mode == "verify" and result.get("summary") and result.get("filename"):
-                # A real migration measured on the GPU: show the same full
-                # report a local run shows, including the source comparison and
-                # the AI review generated on this machine.
                 note = "" if result.get("ok") else str(result.get("error") or "")
                 if not result.get("verified"):
                     toolchain = (
@@ -1299,8 +1238,6 @@ class TargetScreen(Vertical):
         if manual:
             self._reconnect_attempts = 0
         if self._operation_active:
-            # Something the user started is running; try again shortly rather
-            # than cancelling their work or colliding with its status.
             self._reconnect_timer = self.set_timer(5, self._start_reconnect)
             return
         self._reconnect_attempts += 1
@@ -1349,14 +1286,9 @@ class TargetScreen(Vertical):
         if not self.is_mounted:
             return
         if self.query_one("#location-select", Select).value != "cloud":
-            # The user moved away from the target while the probe was in
-            # flight; drop the result rather than yanking them back.
             self._cancel_reconnect()
             return
         if error or facts is None:
-            # A rejected key or an active ban will not fix itself, and retrying
-            # only makes a ban worse; stop and let the tips explain. Everything
-            # else (a dropped route, a rebooting host) gets the next attempt.
             category = classify_connection_failure(error, str(fields.get("kind", "")))
             if category in {"auth", "banned"}:
                 self._cancel_reconnect()
@@ -1458,8 +1390,6 @@ class TargetScreen(Vertical):
 
     def _on_location_changed(self, location: str) -> None:
         """Local readings are always available; remote ones need a connection."""
-        # Leaving or returning to the target invalidates a pending retry; the
-        # user can restart it with the Reconnect button.
         self._stop_reconnect_timer()
         self._refresh_reconnect_button()
         if location == "local":
@@ -1493,8 +1423,6 @@ class TargetScreen(Vertical):
         if stop is not None:
             stop.set()
         if thread is not None and thread.is_alive():
-            # The stream loops wake within a second, so this join is short and
-            # keeps a torn-down screen from leaving a thread attached to it.
             thread.join(timeout=2.0)
 
     def _metrics_loop(
@@ -1558,8 +1486,6 @@ class TargetScreen(Vertical):
             self.app.call_from_thread(self._handle_metrics_loss, message)
 
     def _post_metrics(self, snapshot: MetricsSnapshot) -> None:
-        # The screen may be gone while a stream is still winding down; a
-        # dropped reading is not worth surfacing.
         with contextlib.suppress(Exception):
             self.app.call_from_thread(self._metrics_update, snapshot)
 
@@ -1576,8 +1502,6 @@ class TargetScreen(Vertical):
         panel = self._gpu_panel()
         if panel is not None:
             panel.set_disconnected("TARGET CONNECTION LOST")
-        # Facts describe a live target, so they are now stale; the fields still
-        # say how to reach it, so the reconnect flow can reuse them.
         self._connected_facts = None
         self._stop_reconnect_timer()
         self._set_status(f"Target connection lost · {message}", is_error=True)

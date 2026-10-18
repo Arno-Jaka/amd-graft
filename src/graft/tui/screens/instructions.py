@@ -18,9 +18,6 @@ GUIDE_INTRO = (
     "what it produces."
 )
 
-# Each entry is a heading and its numbered steps. The headings name the card
-# or button the operator is looking for, so the guide stays honest when the
-# interface changes.
 GUIDE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "1 · Convert a file on this machine",

@@ -54,7 +54,6 @@ class TestSummarize:
             json.dumps(real_summary[section])
 
     def test_cpu_run_has_no_benchmarks(self, real_summary):
-        # Benchmarks require a GPU. An empty list, not a fabricated number.
         assert real_summary["benchmarks"] == []
         assert any("benchmark" in note for note in real_summary["skipped"])
 
@@ -90,8 +89,6 @@ class TestSummarize:
         )
         conversion = payload["conversion"]
         assert conversion["measured"] is True
-        # The single most important honesty property: a .cu file that was
-        # never compiled must not read as a completed verification.
         assert "text analysis" in conversion["verdict_basis"]
 
     def test_unmeasured_sections_are_marked(self):
@@ -101,7 +98,6 @@ class TestSummarize:
         assert summary_module._benchmarks(None) == []
 
     def test_non_numeric_errors_do_not_become_zero(self):
-        # A failed run must not read as a fast one.
         assert summary_module._number("boom") is None
         assert summary_module._number(None) is None
         assert summary_module._number(True) is None

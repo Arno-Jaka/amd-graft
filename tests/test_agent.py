@@ -56,7 +56,6 @@ def no_endpoint(monkeypatch):
     return monkeypatch
 
 
-# --- the layering claim ---------------------------------------------------
 
 
 def test_agent_is_unavailable_without_an_endpoint(no_endpoint):
@@ -92,10 +91,6 @@ def test_agent_can_be_disabled_entirely(monkeypatch):
     assert agent.build_agent() is None
 
 
-# The one module allowed to reference the agent. It is the composition
-# root that assembles the stages, so it must be able to ask for a
-# narrative; it imports lazily inside a function so that a missing agent
-# layer still leaves the deterministic path usable.
 COMPOSITION_ROOT = {"pipeline.py"}
 
 
@@ -198,7 +193,6 @@ def test_product_works_with_agent_directory_deleted():
             "PYTHONPATH": str(clone / "src"),
         }
 
-        # Prove the copy is what actually runs before trusting its result.
         probe = subprocess.run(
             [
                 sys.executable,
@@ -265,7 +259,6 @@ def test_product_works_with_agent_directory_deleted():
         assert "OK 40 40" in run.stdout
 
 
-# --- failure containment --------------------------------------------------
 
 
 def test_model_error_becomes_text_not_an_exception():
@@ -335,7 +328,6 @@ def test_narrative_sections_all_populated_when_unavailable(no_endpoint):
     assert all(v.startswith(agent.NOT_AVAILABLE) for v in sections.values())
 
 
-# --- prompt content -------------------------------------------------------
 
 
 def test_system_prompt_forbids_correctness_claims():
@@ -459,7 +451,6 @@ def test_finding_prompt_includes_severity_meaning():
     assert "verify the semantics" in fake.prompts[0]
 
 
-# --- tools ----------------------------------------------------------------
 
 
 def test_tools_register_as_pure_functions():
@@ -559,7 +550,6 @@ def test_test_case_proposal_works_without_an_endpoint(no_endpoint):
     assert "deterministic" in result["note"]
 
 
-# --- report integration ---------------------------------------------------
 
 
 def test_report_renders_narrative_after_the_numbers():
@@ -595,7 +585,6 @@ def test_absent_narrative_says_so_and_is_not_a_blocker():
     assert "does not affect the verdict" in text
 
 
-# --- production wiring ----------------------------------------------------
 
 
 def test_unavailable_reason_is_never_blank_when_the_model_cannot_build(monkeypatch):

@@ -43,5 +43,4 @@ class TestCli:
         main(["migrate", str(EXAMPLE), "--json", "--no-narrative", "--no-bench"])
         payload = json.loads(capsys.readouterr().out)
         assert payload["parity"]["passed"] == 40
-        # The Markdown is dropped so `--json` stays machine-readable.
         assert "report_text" not in payload

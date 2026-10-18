@@ -123,7 +123,6 @@ def _extract_content(body: str) -> str:
     message = first.get("message") if isinstance(first, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, list):
-        # A few OpenAI-compatible servers return content as typed parts.
         content = "".join(
             str(part.get("text", "")) for part in content if isinstance(part, dict)
         )

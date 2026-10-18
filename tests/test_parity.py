@@ -35,7 +35,6 @@ def example():
     return mod
 
 
-# --- the harness must be capable of failing -------------------------------
 
 
 def test_harness_catches_a_deliberately_broken_kernel():
@@ -60,7 +59,6 @@ def test_harness_catches_a_dropped_reduction():
     assert not parity.summarize(results)["all_passed"]
 
 
-# --- correct code must pass -----------------------------------------------
 
 
 def test_exact_match_passes():
@@ -83,7 +81,6 @@ def test_real_example_keeps_error_small(example):
     assert summary["max_abs_error"] < 1e-5
 
 
-# --- failure modes must surface as failures, not crashes ------------------
 
 
 def test_shape_mismatch_is_reported_not_raised():
@@ -126,7 +123,6 @@ def test_one_bad_case_does_not_abort_the_run():
     assert sum(1 for r in results if r.passed) == 4
 
 
-# --- NaN semantics --------------------------------------------------------
 
 
 def test_matching_nan_positions_count_as_match():
@@ -143,7 +139,6 @@ def test_extra_nan_on_the_port_side_fails():
     assert parity.compare(expected, actual, torch.float32)[0] is False
 
 
-# --- summarise ------------------------------------------------------------
 
 
 def test_summarize_reports_counts_and_worst_case(example):
@@ -165,7 +160,6 @@ def test_summarize_handles_empty_input():
     }
 
 
-# --- case generation ------------------------------------------------------
 
 
 def test_cases_are_reproducible_across_calls():
@@ -187,7 +181,6 @@ def test_case_dtype_is_honoured():
         assert case["input"].dtype is torch.float64
 
 
-# --- reference registry and tolerances -----------------------------------
 
 
 def test_reference_lookup_rejects_unknown_operation():

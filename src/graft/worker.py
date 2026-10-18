@@ -42,13 +42,8 @@ from graft import config
 
 PROTOCOL_VERSION = 1
 
-# Files the pipeline can actually route. Anything else is rejected before a
-# child is spawned rather than failing confusingly inside it.
 ALLOWED_SUFFIXES = {".py", ".cu"}
 
-# How much stdout the analysed file may print before its output is
-# truncated. Some is kept because it is often the reason a run failed, but
-# it is bounded so a looping print cannot exhaust memory.
 CODE_STDOUT_LIMIT = 8192
 
 
@@ -135,12 +130,6 @@ def main(argv: list[str] | None = None) -> int:
         target = Path(tmp) / filename
         target.write_text(source, encoding="utf-8")
 
-        # The analysed file is imported by the pipeline, so it runs in this
-        # process and inherits both stdout and stderr. A single print() would
-        # corrupt the JSON response, and a print loop to stderr would grow
-        # the pipe the parent buffers without limit. Both streams are
-        # therefore captured and clipped, then forwarded on stderr where the
-        # noise is still visible for debugging.
         captured = io.StringIO()
         try:
             with (
@@ -151,11 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                     target,
                     run_parity=run_parity,
                     run_bench=run_bench,
-                    # The explicit Gemma choice owns this run's one model
-                    # call; avoid also invoking an unrelated environment model.
                     with_narrative=with_narrative and review_options is None,
-                    # The review runs inside the pipeline so this worker never
-                    # imports the optional agent package directly.
                     ai_review=review_options,
                 )
                 summary = summary_module.summarize(result)
@@ -174,8 +159,6 @@ def main(argv: list[str] | None = None) -> int:
                     clipped += f"\n... {len(noise) - CODE_STDOUT_LIMIT} more characters"
                 print(clipped, file=sys.stderr)
 
-        # The parent only ever sees JSON-native measurements and source text;
-        # provider credentials are deliberately absent from this payload.
         payload = {
             "ok": True,
             "version": PROTOCOL_VERSION,
@@ -186,5 +169,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - exercised via subprocess
+if __name__ == "__main__":
     raise SystemExit(main())

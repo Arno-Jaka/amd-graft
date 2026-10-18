@@ -155,8 +155,6 @@ class GPUStatusPanel(Static):
         GPUStatusPanel._ring(pixels, cx, cy, max(2, radius - 2))
 
         if not broken:
-            # Three broad, swept blades create a curved impeller rather than
-            # crossed spokes. Their angle advances independently per fan.
             for blade in range(3):
                 base = phase + blade * math.tau / 3
                 for y in range(cy - radius + 2, cy + radius - 1):
@@ -170,7 +168,6 @@ class GPUStatusPanel(Static):
                             if abs(delta) < 0.19:
                                 pixels.add((x, y))
         else:
-            # A pulsing cross marks the stopped rotor after its short coast.
             pixels.add((cx, cy))
             if pulse:
                 pixels.update(((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)))
@@ -180,7 +177,6 @@ class GPUStatusPanel(Static):
 
     @staticmethod
     def _braille(pixels: set[tuple[int, int]], width: int, height: int) -> list[str]:
-        # Unicode Braille packs a 2 x 4 dot raster into one terminal cell.
         dot_bits = {
             (0, 0): 0,
             (0, 1): 1,
@@ -207,8 +203,6 @@ class GPUStatusPanel(Static):
         width, height = self._columns * 2, self._rows * 4
         pixels: set[tuple[int, int]] = set()
 
-        # Long angular shroud with the characteristic IO bracket and tapered
-        # PCIe end. All dimensions are in dot pixels, so it scales in terminals.
         outline = [
             (8, 7),
             (14, 2),
@@ -223,7 +217,6 @@ class GPUStatusPanel(Static):
         for start, end in pairwise(outline):
             self._line(pixels, *start, *end)
 
-        # IO shield, mounting notches, and ventilated top edge.
         for y in range(9, height - 9):
             pixels.update(((4, y), (7, y)))
         for x in (4, 5, 6, 7):
@@ -234,7 +227,6 @@ class GPUStatusPanel(Static):
         for x in range(18, width - 18, 4):
             self._line(pixels, x, 1, x + 2, 1)
 
-        # Two symmetric circular impellers, with a small gap between shrouds.
         radius = min(12, (height - 8) // 2, (width // 2 - 9) // 2)
         center_y = height // 2
         fan_offset = radius + 3
@@ -250,7 +242,6 @@ class GPUStatusPanel(Static):
                 pulse=self._pulse,
             )
 
-        # Distinct PCIe contacts along the lower edge of the card.
         contact_y = height - 2
         for x in range(18, width - 18, 3):
             pixels.update(((x, contact_y), (x + 1, contact_y)))
@@ -292,15 +283,9 @@ class GPUMetrics(Static):
     """
 
     BAR_WIDTH = 18
-    # Short enough to fit the narrowest dock that still shows the panel.
     MIN_BAR_WIDTH = 6
-    # The CSS gives this widget `padding: 0 1`, so two cells of every width
-    # measurement belong to the padding, not to the text.
     HORIZONTAL_PADDING = 2
-    # "DISK  {bar}  100%  999.9/999.9 GB" around the bar: label 6, gaps 8,
-    # percentage 4, GB pair 14.
     GAUGE_FIXED = 28
-    # "VRAM  100%  999/999G" — the no-bar fallback for the smallest dock.
     COMPACT_FIXED = 13
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -321,9 +306,6 @@ class GPUMetrics(Static):
         self._render_panel()
 
     def on_resize(self, event: events.Resize) -> None:
-        # Give the bar whatever the widest line cannot spend on fixed text.
-        # Below the minimum the gauge format is dropped for the compact one,
-        # because a squeezed bar reads as noise, not as a reading.
         width = event.size.width
         available = max(0, width - self.HORIZONTAL_PADDING)
         bar_width = max(
@@ -356,15 +338,11 @@ class GPUMetrics(Static):
 
     def _usage(self, label: str, used: int, total: int) -> str:
         if used < 0 or total <= 0:
-            # The bar column is reserved whether it is drawn or not, so
-            # "not measured" lines up with the gauges above and below.
             if self._compact:
                 return f"{label}  not measured"
             return f"{label}  {'not measured':<{self._bar_width + 12}}"
         fraction = used / total
         if self._compact:
-            # "40/100G" rather than "40.0/100.0 GB": the tenths buy nothing
-            # at this width and cost the line its edge.
             return (
                 f"{label}  {fraction * 100:3.0f}%  "
                 f"{used / 1_000_000_000:.0f}/{total / 1_000_000_000:.0f}G"
@@ -400,9 +378,6 @@ class GPUMetrics(Static):
             gauges.append(snapshot.gpu_name)
         source = "TARGET" if snapshot.source == "remote" else "LOCAL"
         footer = " · ".join(gauges) if gauges else (snapshot.error or "no gauges")
-        # A device name is the one field with no natural width limit; it is
-        # clipped rather than wrapped, because a wrapped identity line reads
-        # like two readings.
         if self._width:
             budget = self._width - self.HORIZONTAL_PADDING - len(source) - 4
             if len(footer) > budget:

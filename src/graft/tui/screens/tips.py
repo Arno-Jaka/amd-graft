@@ -20,8 +20,6 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-# Ordered from most to least specific. The first category whose keywords match
-# wins, because a refused socket and a wrong key can both mention the host.
 CATEGORIES = ("banned", "auth", "timeout", "unreachable", "other")
 
 _BANNED_MARKERS = (

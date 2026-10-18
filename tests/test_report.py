@@ -316,7 +316,6 @@ def test_speedup_comparison_renders(full_inputs):
     assert "device vs CPU" in text
 
 
-# --- what the verdict is based on -----------------------------------------
 
 
 def _conversion_line(text: str) -> str:

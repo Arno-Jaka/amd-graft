@@ -23,8 +23,6 @@ from graft.core.converter import MigrationResult, Verdict
 
 NOT_MEASURED = "not measured"
 
-# Leading marker the agent layer uses for anything it could not obtain.
-# Matched as a literal because report/ must not import agent/.
 UNAVAILABLE_MARKER = "not available"
 
 
@@ -122,7 +120,6 @@ def coverage_findings(migration: MigrationResult | None) -> list[dict]:
                 }
             )
         elif str(item).strip():
-            # A bare string predates the structured form; keep its text.
             findings.append(
                 {
                     "severity": "review",
@@ -163,8 +160,6 @@ def _conversion_section(
     items = migration.coverage.unmapped
     if items:
         lines += ["", "### Coverage findings", ""]
-        # Grouped by severity so the reader sees how much work is actually
-        # left: a blocker means a rewrite, a review means verification.
         for level, heading in (
             ("blocker", "Blockers — no mechanical translation exists"),
             ("review", "Needs review — translation exists, verify semantics"),
@@ -174,10 +169,6 @@ def _conversion_section(
                 item
                 for item in items
                 if isinstance(item, dict)
-                # An item with no severity predates the severity model.
-                # Defaulted to review rather than dropped: silently hiding
-                # a finding because it lacked metadata is the exact
-                # failure mode this section exists to prevent.
                 and item.get("severity", "review") == level
             ]
             if not group:
@@ -294,8 +285,6 @@ def _execution_section(inputs: ReportInputs) -> list[str]:
             lines.append(f"- Error: {execution.error_message}")
         lines.append("")
 
-    # Stated unconditionally. The isolation in force is process-level, and
-    # a reader who assumes a real sandbox would over-trust this report.
     lines += ["### Isolation", ""]
     lines += [f"- {note}" for note in runner.sandbox_notes()]
     lines.append("")

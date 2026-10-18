@@ -83,11 +83,6 @@ def _convert_cuda_cpp(result: MigrationResult, route: Route) -> MigrationResult:
     result.ported_source = hipified.source
     result.backend = hipified.backend
     result.changes = hipified.changes
-    # Backend findings are merged, not replaced. The scanner re-reads the
-    # ported source and finds most of the same things, but the backend knows
-    # intent that a regex cannot recover; dropping its notes would lose the
-    # reason a construct was flagged. _apply_verdict replaces unmapped with
-    # the scanner output, which carries the same symbols at higher fidelity.
     result.notes = [*hipified.notes, *result.notes]
     result.notes.append(f"build with: {hipify_backend.build_command()}")
 
@@ -121,8 +116,6 @@ def convert(source: str, path: Path | None = None) -> MigrationResult:
     result.changes = log.changes
     result.coverage.findings = route.notes
 
-    # The GPU_DEVICE_INDEX import is ensured by the rewriter, on the AST,
-    # where it can see existing imports and respect __future__ placement.
 
     _apply_verdict(result)
     return result

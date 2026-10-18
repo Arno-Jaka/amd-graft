@@ -50,7 +50,6 @@ def _completion(content: str) -> bytes:
     ).encode("utf-8")
 
 
-# --- the client ------------------------------------------------------------
 
 
 def test_chat_posts_the_openai_shape(monkeypatch):
@@ -107,7 +106,6 @@ def test_an_http_error_keeps_the_key_out_of_the_message(monkeypatch):
     assert "top-secret" not in str(excinfo.value)
 
 
-# --- convert_with_gemma ----------------------------------------------------
 
 
 def _patch_complete(monkeypatch, reply: str):
@@ -143,7 +141,6 @@ def test_convert_parses_code_filename_and_comments(monkeypatch):
     assert result["filename"] == "kernel_gemma.cu"
     assert result["provider"] == "gemma"
     assert result["comments"][0]["line"] == 2
-    # A line number past the end of the code is dropped, not guessed.
     assert result["comments"][1]["line"] is None
     assert result["comments"][1]["severity"] == "review"
 
@@ -199,7 +196,6 @@ def test_convert_refuses_an_oversized_file():
     assert "limit" in result["reason"]
 
 
-# --- review_conversion -----------------------------------------------------
 
 
 def test_review_normalises_recommendation_and_line_numbers(monkeypatch):
@@ -233,10 +229,8 @@ def test_review_normalises_recommendation_and_line_numbers(monkeypatch):
     )
     assert result["available"] is True
     assert result["provider"] == "gemma"
-    # An unknown recommendation is clamped to the safe default.
     assert result["recommendation"] == "engineer_review_required"
     assert result["comments"][0]["line"] == 1
-    # Line 50 does not exist in the one-line original.
     assert result["comments"][1]["line"] is None
 
 

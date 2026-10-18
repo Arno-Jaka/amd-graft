@@ -26,7 +26,6 @@ def result():
     return pipeline.run(EXAMPLE, with_narrative=False)
 
 
-# --- the sequence ---------------------------------------------------------
 
 
 def test_every_deterministic_stage_is_present(result):
@@ -66,12 +65,11 @@ def test_readiness_is_derived_not_asserted(result):
     is the whole point of the report.
     """
     assert result.verdict is not None
-    assert "PRODUCTION READY" in result.report_text  # conversion verdict
-    assert "**NEEDS REVIEW**" in result.report_text  # overall readiness
+    assert "PRODUCTION READY" in result.report_text
+    assert "**NEEDS REVIEW**" in result.report_text
     assert "No AMD GPU was detected" in result.report_text
 
 
-# --- degradation ----------------------------------------------------------
 
 
 def test_narrative_is_absent_when_no_endpoint(result):
@@ -137,7 +135,6 @@ def test_narrative_helper_survives_a_missing_agent_layer(monkeypatch):
     assert all(value.startswith("not available") for value in texts.values())
 
 
-# --- module loading -------------------------------------------------------
 
 
 def test_load_module_does_not_leak_sys_path(tmp_path: Path):
@@ -156,7 +153,6 @@ def test_load_module_reports_a_syntax_error(tmp_path: Path):
         pipeline.load_module(bad)
 
 
-# --- example contract -----------------------------------------------------
 
 
 def test_example_exports_the_benchmark_contract():
@@ -191,7 +187,6 @@ def test_missing_arg_is_reported_as_a_skip(tmp_path: Path):
     assert result.inputs.benchmarks == []
 
 
-# --- reviewing a run measured elsewhere -----------------------------------
 
 
 def _summary_payload(**overrides):

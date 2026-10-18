@@ -13,10 +13,6 @@ import re
 
 from graft.target.spec import TargetError
 
-# Look on the host and inside each running container, then fall back to a live
-# process's own arguments. Every branch is best-effort: a missing tool or an
-# unreadable file must not abort the search, so failures are swallowed and the
-# caller simply sees no token rather than a broken command.
 TOKEN_DISCOVERY_SCRIPT = r"""
 set +e
 
@@ -49,10 +45,6 @@ done
 ps -eo args 2>/dev/null | grep -Eo '(ServerApp|NotebookApp)\.token=[^ ]+' 2>/dev/null
 """
 
-# A token is opaque, but a real one is long and drawn from the URL-safe base64
-# alphabet (which includes '+', '/', and '='). Six characters is the shortest
-# worth trusting; shorter runs are almost always a placeholder or a variable
-# name caught by the looser patterns below.
 _TOKEN_RES = (
     re.compile(r'"token"\s*:\s*"([^"]{6,})"'),
     re.compile(r"'token'\s*:\s*'([^']{6,})'"),
@@ -60,9 +52,6 @@ _TOKEN_RES = (
     re.compile(r"\btoken\s*[=:]\s*['\"]?([A-Za-z0-9._~+/=%-]{6,})"),
 )
 
-# Values that parse like a token but never are: disabled auth, or an unset
-# placeholder. Treating any of them as the answer would be worse than finding
-# nothing, because the connection would then fail with a confusing auth error.
 _NOT_A_TOKEN = {"disabled", "none", "null", "false", "true", "${token}"}
 
 

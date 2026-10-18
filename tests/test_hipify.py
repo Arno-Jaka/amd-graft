@@ -35,7 +35,6 @@ int main() {
 """
 
 
-# --- mechanical renaming -------------------------------------------------
 
 
 def test_runtime_symbols_are_renamed():
@@ -108,7 +107,6 @@ def test_translated_source_matches_the_change_log():
     assert "hipMalloc" in result.source
 
 
-# --- things that must NOT be silently translated --------------------------
 
 
 def test_inline_ptx_is_reported_not_renamed():
@@ -165,7 +163,6 @@ def test_ptx_short_circuits_before_any_renaming():
     assert result.changes == []
 
 
-# --- routing integration --------------------------------------------------
 
 
 def test_cu_file_routes_to_hipify():
@@ -197,7 +194,6 @@ def test_unknown_source_remains_unsupported():
     assert result.coverage.verdict is Verdict.UNSUPPORTED
 
 
-# --- official tool delegation --------------------------------------------
 
 
 def test_table_is_used_when_hipify_absent(monkeypatch):

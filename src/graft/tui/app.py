@@ -1015,9 +1015,6 @@ class GraftTUI(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        # The dock is app-level, so its responsive classes follow the window
-        # rather than any one screen. Below 64 columns there is no room for a
-        # useful panel beside the workspace, so it steps aside entirely.
         self._resize_gpu_dock(self.size)
 
     def on_resize(self, event: events.Resize) -> None:
@@ -1026,7 +1023,7 @@ class GraftTUI(App):
     def _resize_gpu_dock(self, size) -> None:
         try:
             dock = self.query_one("#gpu-dock")
-        except Exception:  # not composed yet
+        except Exception:
             return
         width, height = size.width, size.height
         dock.set_class(width < 64, "hidden")
@@ -1053,7 +1050,6 @@ class GraftTUI(App):
             if panel is not None:
                 getattr(panel, method)(*args)
         except Exception:
-            # A missing panel must never break the flow that reported to it.
             pass
 
     def action_show_workspace(self) -> None:

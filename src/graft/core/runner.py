@@ -35,8 +35,6 @@ from pathlib import Path
 
 from graft import config
 
-# Protocol version: the child and parent must agree on the JSON shape.
-# Bump when the result schema changes so a stale child fails loudly.
 PROTOCOL = 1
 
 
@@ -77,8 +75,6 @@ class ExecutionResult:
         return f"ExecutionResult(ok={self.ok}, {self.summary()})"
 
 
-# Executed in the child. Kept as a module-level string so it can be read
-# and audited as code rather than as an opaque blob.
 CHILD_SOURCE = """
 import importlib.util
 import json
@@ -178,8 +174,6 @@ def _case_pair(case) -> tuple[str, object]:
 
 def _environment() -> dict[str, str]:
     env = dict(os.environ)
-    # Keep the child's device choice explicit rather than inherited, so a
-    # stray CUDA_VISIBLE_DEVICES cannot silently change what was measured.
     env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     env["GRAFT_PROTOCOL"] = str(PROTOCOL)
     env.setdefault("PYTHONUNBUFFERED", "1")

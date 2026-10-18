@@ -22,8 +22,6 @@ from graft.target.detect import TargetFacts
 
 NOT_MEASURED = "not measured"
 
-# A verdict below production ready means the mechanical pass left work for a
-# human. That is exactly when the "convert with Gemma" action is offered.
 NEEDS_MANUAL_PORT = {"needs_review", "manual_port", "unsupported"}
 
 
@@ -195,8 +193,6 @@ class ResultsScreen(VerticalScroll):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._converted_source = ""
-        # State for the optional AI-conversion path. Kept on the screen so the
-        # buttons can act on the same source the report describes.
         self._original_source = ""
         self._source_filename = "converted.py"
         self._source_path = ""
@@ -272,9 +268,6 @@ class ResultsScreen(VerticalScroll):
             )
         )
 
-    # ------------------------------------------------------------------
-    # internal rendering helpers
-    # ------------------------------------------------------------------
     def _body(self) -> Vertical:
         return self.query_one("#results-body", Vertical)
 
@@ -303,9 +296,6 @@ class ResultsScreen(VerticalScroll):
     def _mount_body(self, *widgets: Any) -> None:
         self._body().mount(*widgets)
 
-    # ------------------------------------------------------------------
-    # public views
-    # ------------------------------------------------------------------
     def show_empty(self) -> None:
         self._set_heading("Results", "info")
         self._set_summary(None)
@@ -652,9 +642,6 @@ class ResultsScreen(VerticalScroll):
             )
             ai_section.extend(_ai_review_rows(ai_review))
 
-        # An AI conversion is offered only when the mechanical pass left work
-        # for a human: a blocker, a failing parity case, or a verdict below
-        # production ready. On a clean port it would be noise.
         needs_manual = (
             blockers > 0
             or parity_failed
@@ -705,9 +692,6 @@ class ResultsScreen(VerticalScroll):
             ),
         )
 
-    # ------------------------------------------------------------------
-    # optional AI conversion
-    # ------------------------------------------------------------------
     def _ai_assist_widgets(self) -> list[Any]:
         """The labelled block that offers to finish the port with Gemma."""
         model = self._ai_options.get("model") or "the configured Gemma model"
@@ -757,14 +741,13 @@ class ResultsScreen(VerticalScroll):
             "options": self._ai_options,
         }
         try:
-            # Route through the composition root, never graft.agent from the UI.
             result = pipeline.convert_with_ai(
                 original_source,
                 evidence,
                 self._ai_options,
                 filename=filename,
             )
-        except Exception as exc:  # defensive: worker thread must not crash the app
+        except Exception as exc:
             result = {
                 "available": False,
                 "reason": f"AI conversion failed ({type(exc).__name__}).",

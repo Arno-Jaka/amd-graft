@@ -32,11 +32,6 @@ ARCHIVE_NAME = "graft-remote.tar.gz"
 RESULT_MARKER = "__GRAFT_JSON__"
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 
-# What is left out of the uploaded tree. .git matters most: it is large, and
-# shipping a repository's history to a third-party host is not something to do
-# by default. Credential files matter more: the tree is uploaded to a machine
-# the operator may not own, so a root .env holding LLM_API_KEY must never ride
-# along. Matching by name (not only by directory) is what stops that.
 EXCLUDED_DIRS = {".git", ".venv", "__pycache__", ".ruff_cache", ".mypy_cache"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDED_FILES = {".env", ".envrc", "id_rsa", "id_ed25519", "credentials"}
@@ -45,12 +40,6 @@ EXCLUDED_FILES = {".env", ".envrc", "id_rsa", "id_ed25519", "credentials"}
 def _is_secret_file(name: str) -> bool:
     return name in EXCLUDED_FILES or name.startswith(".env.")
 
-# The remote script. It runs Graft's own verification tools rather than
-# reimplementing anything, so the numbers it reports come from the same code
-# path the local run uses.
-# Single braces throughout: this string is only .replace()d, never
-# .format()d, so doubled braces would print literally and the JSON
-# below would not parse.
 REMOTE_SCRIPT = r"""
 set -o pipefail
 cd __REMOTE_DIR__ || exit 2
@@ -96,10 +85,6 @@ exit $status
 """
 
 
-# Remote script for running and verifying a Gemma-produced file. Graft is
-# uploaded first, so the verification runs against the same deterministic
-# pipeline a local run uses. Execution and verification are reported as
-# separate steps so a failure names which one broke.
 AI_REMOTE_SCRIPT = r"""
 set -o pipefail
 cd __REMOTE_DIR__ || exit 2
@@ -169,13 +154,7 @@ class RemoteRun:
     ok: bool = False
     error: str = ""
     filename: str = ""
-    # Whether the HIP toolchain self-check passed. For a selected-file verify
-    # this is informational, not a gate: a valid Python/ROCm target need not
-    # have a C++ compiler.
     verified: bool = False
-    # The pipeline's own JSON summary, when the verify run migrated a source
-    # file. This is the same projection the local UI renders, so the remote
-    # report can reuse it (source comparison included) without a second run.
     summary: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -228,8 +207,6 @@ def _unpack_hint(result: Any, spec: TargetSpec) -> str:
     """
     summary = result.summary()
     lowered = summary.lower()
-    # "cannot open" also covers a permissions failure, which is a different
-    # problem with a different fix, so check that case first.
     denied = "permission denied" in lowered
     missing = not denied and any(
         needle in lowered for needle in ("cannot open", "no such file")
@@ -265,8 +242,6 @@ def _extract_json(stdout: str) -> dict[str, Any] | None:
     if start == -1:
         return None
     body = stdout[start + len(RESULT_MARKER) :].lstrip()
-    # The object may be preceded by unrelated shell noise, so decode from the
-    # first brace rather than trusting the line to start cleanly.
     depth = 0
     start_brace = -1
     in_string = False
@@ -370,9 +345,6 @@ def run_remote(
             error=f"The project uploaded but would not unpack. {_unpack_hint(unpack, spec)}",
         )
 
-    # Default to Graft's own example so a plain "verify" still exercises the
-    # full toolchain. A selected file is placed beside the tree and migrated
-    # instead, so the evidence describes the operator's source.
     pipeline_file = "examples/01_torch_cuda_softmax.py"
     filename = ""
     if run_file is not None:
@@ -409,9 +381,6 @@ def run_remote(
 
     payload = _extract_json(result.stdout) or {}
     if not payload:
-        # The script speaks JSON between markers. If that is missing, the script
-        # died before it got there, and "did not verify" on its own tells the
-        # operator nothing about why. Show what actually came back.
         return RemoteRun(
             spec_label=label,
             facts=facts,
@@ -444,17 +413,11 @@ def run_remote(
     verify_output = (steps.get("verify_hip") or {}).get("output", "")
     verified = bool(_VERIFY_PASS.search(verify_output))
 
-    # The pipeline step prints the same JSON summary the local UI renders.
-    # Reuse it so a remote verify can show the report and the source diff
-    # without re-running anything on this machine.
     summary = _parse_json_text((steps.get("pipeline") or {}).get("output", ""))
     pipeline_rc = int((steps.get("pipeline") or {}).get("returncode", 1))
 
     problems = list(facts.problems)
     if run_file is not None:
-        # The operator's own file is the measurement that matters. The HIP
-        # toolchain self-check is informational here, not a gate, because a
-        # valid Python/ROCm target need not have a C++ compiler.
         if summary is None or pipeline_rc != 0:
             problems.append(
                 "The migration did not complete on the target. See the pipeline "
@@ -601,9 +564,6 @@ def run_remote_file(
         timeout_s=spec.command_timeout_s,
     )
     if not gpu_probe.ok:
-        # A missing PyTorch and a PyTorch that cannot see the GPU are different
-        # problems with different fixes, but the interpreter reports both as a
-        # failed probe. Say which one it is.
         if "no module named 'torch'" in gpu_probe.output.lower():
             error = (
                 "The target has no PyTorch installed, so the converted file "

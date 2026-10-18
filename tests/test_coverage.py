@@ -54,7 +54,6 @@ int main() {
 """
 
 
-# --- severity classification ---------------------------------------------
 
 
 def test_inline_ptx_is_a_blocker():
@@ -107,7 +106,6 @@ def test_info_does_not_cap_the_verdict():
     assert assessment.verdict == "production_ready"
 
 
-# --- actionable detail ----------------------------------------------------
 
 
 def test_every_finding_has_a_line_number():
@@ -180,7 +178,6 @@ def test_to_dict_is_renderable_by_the_report():
         assert payload["line"] >= 1
 
 
-# --- summary --------------------------------------------------------------
 
 
 def test_summary_counts_by_severity():
@@ -204,7 +201,6 @@ def test_manual_work_flag_tracks_blockers_only():
     assert coverage.assess(CLEAN_SOURCE).manual_work_required is False
 
 
-# --- converter integration ----------------------------------------------
 
 
 def test_converter_routes_verdict_through_coverage():

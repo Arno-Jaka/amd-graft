@@ -24,8 +24,6 @@ KIND_SSH = "ssh"
 KIND_JUPYTER = "jupyter"
 KINDS = (KIND_SSH, KIND_JUPYTER)
 
-# Sentinel written in place of a secret. Long enough that a reader can see
-# something was removed, short enough not to be mistaken for real output.
 REDACTED = "********"
 
 DEFAULT_SSH_PORT = 22
@@ -36,13 +34,8 @@ SCHEME_HTTP = "http"
 SCHEME_HTTPS = "https"
 DEFAULT_REMOTE_DIR = "/root/graft"
 
-# Hostnames and addresses only. Deliberately stricter than socket semantics:
-# a target is typed by a human into a form, and anything exotic here is far
-# more likely to be a paste accident than a real cloud endpoint.
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$")
 
-# Remote paths we control. Rejecting everything else keeps a stray value from
-# turning into an argument injection or a write outside the intended tree.
 _REMOTE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,180}$")
 
 _HOST_CHARS_FORBIDDEN = "@:/\\?#"
@@ -102,7 +95,6 @@ def _split_jupyter_url(raw: str) -> tuple[str, int | None]:
     a port.
     """
     if "://" not in raw and "/" not in raw:
-        # Bare "host:port", which urlsplit cannot tell apart from a scheme.
         bare = _BARE_HOST_PORT_RE.match(raw)
         if bare:
             return bare.group("host"), int(bare.group("port")), SCHEME_HTTP
@@ -133,14 +125,8 @@ class TargetSpec:
     kind: Literal["ssh", "jupyter"]
     host: str
     port: int = 0
-    # Transport security for Jupyter only; SSH decides this itself. Kept as a
-    # field because the host string is reduced to a bare name, and dropping the
-    # scheme here would silently downgrade an https:// target to plaintext.
     scheme: str = ""
     username: str = ""
-    # Path on the local machine to a private key. This is a filesystem path
-    # rather than a secret, so it is not a credential; it is still elided
-    # from redacted output because it can reveal local directory layout.
     key_path: str = ""
     key_passphrase: str = field(default="", repr=False)
     token: str = field(default="", repr=False)
@@ -148,10 +134,6 @@ class TargetSpec:
     command_timeout_s: int = 900
 
     def __post_init__(self) -> None:
-        # Normalise before validating. The dataclass is frozen, so each
-        # field is set once, here, and validation below then only has to
-        # check final values. Doing it in this order is what keeps an empty
-        # port from surviving as 0 and rendering as "host:0".
         object.__setattr__(self, "kind", _clean(self.kind).lower())
         object.__setattr__(self, "host", _clean(self.host))
         object.__setattr__(self, "username", _clean(self.username))
@@ -174,8 +156,6 @@ class TargetSpec:
             if explicit is not None:
                 port = _coerce_port(explicit, port_default)
             elif scheme == SCHEME_HTTPS:
-                # An https:// URL with no port means 443, not 80. Defaulting
-                # to 80 here is what made every hosted provider unreachable.
                 port = _coerce_port(self.port, DEFAULT_HTTPS_PORT)
         else:
             host, scheme = self.host, ""
@@ -185,7 +165,6 @@ class TargetSpec:
 
         _validate(self)
 
-    # -- secrets ---------------------------------------------------------
 
     @property
     def secret(self) -> str:
@@ -235,10 +214,6 @@ def _validate(spec: TargetSpec) -> None:
             not any(character.isspace() for character in spec.username),
             "Username cannot contain spaces.",
         )
-        # An explicit key is required. The alternative is letting paramiko fall
-        # back to the local ssh-agent, which would silently borrow a standing
-        # credential from the machine and make the form's promise ("used for
-        # this request only") false.
         _require(bool(spec.key_path), "SSH needs a private key path.")
         _require(len(spec.key_path) <= 4096, "Key path is too long.")
         _require("\x00" not in spec.key_path, "Key path contains an invalid character.")
@@ -308,8 +283,6 @@ def parse_form(fields: dict[str, Any]) -> TargetSpec:
     return TargetSpec(
         kind=kind,
         host=_clean(fields.get("host")),
-        # 0 means "not given". Deciding the default here instead would fix the
-        # port at 80 and make an https:// URL with no port unreachable.
         port=_clean(fields.get("port")) or 0,
         username=_clean(fields.get("username")),
         key_path=_clean(fields.get("key_path")),

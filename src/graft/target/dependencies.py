@@ -19,8 +19,6 @@ from typing import Any
 from graft.target.detect import TargetFacts
 from graft.target.transport import quote
 
-# Only these OS families are assumed to have apt. Anything else gets a manual
-# hint rather than a command that would fail confusingly.
 _DEBIAN_LIKE = ("ubuntu", "debian", "linux mint", "pop!_os")
 
 
@@ -33,7 +31,6 @@ class Dependency:
     present: bool
     required: bool
     detail: str = ""
-    # A shell command to install it, or "" when it has to be installed by hand.
     command: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -51,9 +48,6 @@ def _is_debian_like(facts: TargetFacts) -> bool:
     return any(name in facts.os_name.lower() for name in _DEBIAN_LIKE)
 
 
-# A bare cloud image often ships python3 without pip, so the ROCm wheel install
-# would fail with "No module named pip" before it ever reached PyTorch. On
-# apt-based targets the command installs python3-pip first, then runs pip3.
 _APT_INSTALL = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y"
 
 
@@ -83,8 +77,6 @@ def _python_is_externally_managed(facts: TargetFacts) -> bool:
     major = int(match.group(1))
     minor = int(match.group(2) or 0)
     if "linux mint" in name:
-        # Mint 22 is based on Ubuntu 24.04 and enforces PEP 668; 21 and older
-        # are based on 22.04 and do not.
         return major >= 22
     if "debian" in name:
         return major >= 12
@@ -125,7 +117,6 @@ def _torch_command(facts: TargetFacts) -> tuple[str, str]:
         else:
             command = f"{python} -m pip install{break_flag} {wheels}"
         return command, f"PyTorch from the ROCm {rocm_series} wheel index."
-    # Keep behavior consistent with tests: when unknown, fall back to PyPI
     return (
         f"{python} -m pip install{break_flag} --upgrade pip && "
         f"{python} -m pip install{break_flag} torch torchvision",
