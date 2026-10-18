@@ -252,8 +252,11 @@ def run(
 
     case_list = case_module.generate() if run_parity else []
     if run_parity and module is not None:
-        inputs.parity_results = parity.check(module, case_list)
-        inputs.parity = parity.summarize(inputs.parity_results)
+        try:
+            inputs.parity_results = parity.check(module, case_list)
+            inputs.parity = parity.summarize(inputs.parity_results)
+        except Exception as exc:
+            skipped.append(f"parity: {type(exc).__name__}: {exc}")
 
     if original_module is not None:
         inputs.execution = runner.run_cases(inputs.migration.ported_source, case_list)

@@ -187,6 +187,22 @@ def test_missing_arg_is_reported_as_a_skip(tmp_path: Path):
     assert result.inputs.benchmarks == []
 
 
+def test_a_module_without_an_operation_skips_parity(tmp_path: Path):
+    """A ported module with no OPERATION must skip parity, not crash the run.
+
+    parity.check reads module.OPERATION, so a file the converter cannot map to
+    a known operation raised AttributeError straight out of run() instead of
+    downgrading the report the way every other optional stage does.
+    """
+    plain = tmp_path / "plain.py"
+    plain.write_text("import torch\n\n\ndef solve(x):\n    return x\n")
+    result = pipeline.run(
+        plain, run_parity=True, run_bench=False, with_narrative=False
+    )
+    assert any("OPERATION" in note for note in result.skipped)
+    assert result.inputs.parity is None
+
+
 
 
 def _summary_payload(**overrides):
