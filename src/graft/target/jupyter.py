@@ -445,6 +445,7 @@ class JupyterTransport:
         if not parts:
             raise TransportError("Upload needs a filename.")
         directory, name = "/".join(parts[:-1]), parts[-1]
+        self._ensure_dir(f"/{directory}" if directory else "")
         parent = self._contents_path(f"/{directory}" if directory else "")
         body = {
             "type": "file",
@@ -458,6 +459,35 @@ class JupyterTransport:
             timeout=300,
             data=json.dumps(body),
         )
+
+    def _ensure_dir(self, directory: str) -> None:
+        """Create a remote directory and its parents through the contents API.
+
+        The contents API writes a file only where its directory already exists:
+        a missing parent fails with an HTTP 500 from the filesystem rather than
+        creating the tree, and a nested create does not make its own parents
+        either. The shell path would have run ``mkdir -p`` first, so the upload
+        walks the same path one component at a time. Creating a directory that
+        is already there is idempotent (the API answers 201 either way), so
+        repeated runs are safe.
+        """
+        root = self.server_root.rstrip("/")
+        path = directory.rstrip("/")
+        if root and (path == root or path.startswith(root + "/")):
+            relative = path[len(root) :]
+        else:
+            relative = path
+        accum = ""
+        for part in (part for part in relative.split("/") if part):
+            accum = f"{accum}/{part}" if accum else part
+            self._request(
+                "PUT",
+                "/api/contents/"
+                + "/".join(url_quote(piece) for piece in accum.split("/")),
+                what=f"preparing {accum}",
+                timeout=60,
+                data=json.dumps({"type": "directory"}),
+            )
 
     def pull(self, remote_path: str) -> bytes:
         path = f"{self._contents_path(remote_path)}?content=1"

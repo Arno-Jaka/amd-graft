@@ -1258,6 +1258,58 @@ class TestJupyterConnectRetry:
         assert len(attempts) == 2
 
 
+class TestJupyterUploadMakesItsDirectory:
+    """The contents API will not create a parent, so the upload has to.
+
+    A PUT to a file whose directory is absent fails with an HTTP 500 from the
+    filesystem, and a nested directory create does not make its own parents.
+    The upload therefore walks the directory one component at a time first.
+    """
+
+    def _transport(self, monkeypatch):
+        from graft.target import jupyter
+
+        spec = parse_form(
+            {"kind": "jupyter", "host": "gpu.example.com", "token": "t"}
+        )
+        transport = jupyter.JupyterTransport(spec)
+        transport._server_root = "/shared-docker"
+        return transport
+
+    def test_push_creates_the_parent_before_the_file(self, monkeypatch):
+        transport = self._transport(monkeypatch)
+        calls: list[tuple[str, str, dict]] = []
+
+        def record(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return _FakeResponse()
+
+        monkeypatch.setattr(transport.session, "request", record)
+        transport.push(b"archive", "/shared-docker/root/graft-remote.tar.gz")
+
+        assert calls[0][0] == "PUT"
+        assert calls[0][1].endswith("/api/contents/root")
+        assert calls[0][2]["data"] == '{"type": "directory"}'
+        assert calls[-1][1].endswith("/api/contents/root/graft-remote.tar.gz")
+
+    def test_a_nested_directory_is_created_one_component_at_a_time(self, monkeypatch):
+        transport = self._transport(monkeypatch)
+        urls: list[str] = []
+
+        def record(method, url, **kwargs):
+            urls.append(url)
+            return _FakeResponse()
+
+        monkeypatch.setattr(transport.session, "request", record)
+        transport.push(b"x", "/shared-docker/a/b/c.bin")
+
+        assert [url.rsplit("/api/", 1)[-1] for url in urls] == [
+            "contents/a",
+            "contents/a/b",
+            "contents/a/b/c.bin",
+        ]
+
+
 class _RecordingSocket:
     """A terminal socket that records sends and replays canned frames."""
 
