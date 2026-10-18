@@ -631,6 +631,42 @@ def test_a_failed_selected_file_migration_is_not_ok(source_tree):
     assert "did not complete" in run.error
 
 
+def test_a_file_migration_without_torch_names_the_missing_dependency(source_tree):
+    """A host without PyTorch cannot run the pipeline, so say why.
+
+    The pipeline imports torch, so a missing PyTorch kills it at import and no
+    JSON report is produced. That has to read as a missing dependency, not as an
+    unexplained pipeline failure the operator cannot act on.
+    """
+    body = json.dumps(
+        {
+            "steps": {
+                "verify_hip": {"returncode": 0, "output": "HIP VERIFICATION PASSED"},
+                "pipeline": {
+                    "returncode": 1,
+                    "output": "ModuleNotFoundError: No module named 'torch'",
+                },
+            }
+        }
+    )
+    probe = GOOD_PROBE.replace("<<<torch>>>2.12.0+rocm10.0.0|AMD Instinct MI300X VF\n", "")
+    transport = FakeTransport(
+        {
+            "emit os": CommandResult("probe", 0, probe, ""),
+            remote_module.RESULT_MARKER: CommandResult(
+                "run", 0, f"{remote_module.RESULT_MARKER}\n{body}", ""
+            ),
+            "tar xzf": CommandResult("unpack", 0, "", ""),
+        }
+    )
+    run = remote_module.run_remote(
+        transport, _spec(), source=source_tree, run_file=("kernel.py", "import torch\n")
+    )
+    assert not run.ok
+    assert "needs PyTorch" in run.error
+    assert "did not complete" not in run.error
+
+
 def test_a_file_run_lands_under_the_transport_root():
     transport = _RootedTransport(
         {

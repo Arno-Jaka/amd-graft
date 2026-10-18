@@ -236,6 +236,32 @@ def _script_failure_hint(result: Any) -> str:
     return f"{lead} stdout: {out or '(empty)'} stderr: {err or '(empty)'}"
 
 
+_MISSING_TORCH = re.compile(r"No module named ['\"]?torch", re.IGNORECASE)
+
+
+def _migration_failure(facts: TargetFacts, pipeline_output: str) -> str:
+    """Explain a failed migration, calling out a missing PyTorch.
+
+    The pipeline imports torch, so a host without it cannot migrate at all: the
+    command dies on import and no JSON report is produced. That is the ordinary
+    shape of a container-based image, where PyTorch lives off-host and SSH never
+    sees it, so the raw traceback is replaced with a caution that names the real
+    cause rather than a bare "the migration did not complete".
+    """
+    if not facts.torch_version or _MISSING_TORCH.search(pipeline_output or ""):
+        return (
+            "The migration needs PyTorch on the target, but none was found on "
+            "the host. An image that keeps PyTorch inside a container (or "
+            "installs it per session) looks empty from SSH. Install PyTorch on "
+            "the host (see the dependency section) or connect with the Jupyter "
+            "transport, then run again."
+        )
+    return (
+        "The migration did not complete on the target. See the pipeline step "
+        "output for the failure."
+    )
+
+
 def _extract_json(stdout: str) -> dict[str, Any] | None:
     """Pull the JSON object the remote script printed between its markers."""
     start = stdout.find(RESULT_MARKER)
@@ -420,8 +446,9 @@ def run_remote(
     if run_file is not None:
         if summary is None or pipeline_rc != 0:
             problems.append(
-                "The migration did not complete on the target. See the pipeline "
-                "step output for the failure."
+                _migration_failure(
+                    facts, (steps.get("pipeline") or {}).get("output", "")
+                )
             )
         ok = summary is not None and pipeline_rc == 0 and not problems
     else:
