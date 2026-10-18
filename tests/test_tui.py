@@ -12,13 +12,12 @@ from typing import Any
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Button, ProgressBar, Select, Static
+from textual.widgets import Button, Input, Select, Static
 
 from graft.target.dependencies import scan_dependencies
 from graft.target.detect import TargetFacts
 from graft.target.metrics import MetricsSnapshot
 from graft.tui.app import GraftTUI
-from graft.tui.screens.copy_popup import CopyPopup
 from graft.tui.screens.deps import DependencyOverlay
 from graft.tui.screens.instructions import GUIDE_SECTIONS, InstructionsScreen
 from graft.tui.screens.results import ResultsScreen
@@ -137,10 +136,12 @@ def test_remote_report_renders_the_target_the_report_and_the_source_diff():
     assert "Remote migration report" in text
     assert "REMOTE TARGET" in text
     assert "AMD Instinct MI300X VF" in text
-    # The same report body a local run shows, including the source comparison.
+    # The same report body a local run shows, with the two files held behind a
+    # popup so a long port does not bury the measured evidence.
     assert "SOURCE COMPARISON" in text
-    assert "print('original')" in text
-    assert "print('converted')" in text
+    assert "original · /tmp/m.py · 1 line(s)" in text
+    assert "converted · 1 line(s)" in text
+    assert "print('original')" not in text
 
 
 def test_remote_report_includes_the_locally_generated_ai_review():
@@ -201,7 +202,143 @@ def test_remote_verify_of_a_selected_file_shows_the_full_report():
     blob = asyncio.run(main())
     assert "Remote migration report" in blob
     assert "SOURCE COMPARISON" in blob
-    assert "print('converted')" in blob
+    assert "original · /tmp/m.py · 1 line(s)" in blob
+
+
+def test_the_source_comparison_opens_in_an_overlay_with_both_files():
+    """The report keeps a summary; the two files live in a popup."""
+
+    async def main() -> tuple[bool, str, str]:
+        app = GraftTUI()
+        async with app.run_test(size=(160, 60)) as pilot:
+            results = app.query_one("#results-view", ResultsScreen)
+            results.show_remote_report(
+                _summary(ai_review=None),
+                "m.py",
+                "/tmp/m.py",
+                "print('original')\n",
+                facts=_target_facts(),
+            )
+            app.query_one("#main-tabs").active = "results"
+            await pilot.pause()
+            button = results.query_one("#compare-source", Button)
+            before = button.disabled
+            # The comparison row sits below the fold in a full report, so press
+            # the button through its message handler rather than by position.
+            results.post_message(Button.Pressed(button))
+            await pilot.pause()
+            popup = app.screen
+            blob = "\n".join(str(w.render()) for w in popup.query(Static))
+            return before, type(popup).__name__, blob
+
+    before, popup_name, blob = asyncio.run(main())
+    assert before is False
+    assert popup_name == "SourceComparePopup"
+    assert "ORIGINAL" in blob
+    assert "CONVERTED" in blob
+    assert "1 │ print('original')" in blob
+    assert "1 │ print('converted')" in blob
+
+
+def test_a_passed_verification_arms_the_upload_button():
+    async def main() -> tuple[bool, bool]:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            button = screen.query_one("#run-converted", Button)
+            before = button.disabled
+            screen._remote_done(
+                {
+                    "ok": True,
+                    "filename": "m.py",
+                    "facts": _target_facts(),
+                    "summary": _summary(ai_review=None),
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            return before, button.disabled
+
+    before, after = asyncio.run(main())
+    assert before is True
+    assert after is False
+
+
+def test_a_verification_that_did_not_complete_leaves_the_upload_button_disabled():
+    """Nothing unverified may be pushed to a GPU."""
+
+    async def main() -> tuple[bool, str]:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            button = screen.query_one("#run-converted", Button)
+            # Arm it first so the test proves the failure clears it, rather
+            # than just never enabling it.
+            screen._set_converted_file("print('converted')\n", "m.py", verified=True)
+            await pilot.pause()
+            armed = button.disabled
+            screen._remote_done(
+                {
+                    "ok": False,
+                    "filename": "m.py",
+                    "facts": _target_facts(),
+                    "error": "The migration did not complete on the target.",
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            return armed, button.disabled
+
+    armed, after = asyncio.run(main())
+    assert armed is False
+    assert after is True
+
+
+def test_verifying_the_bundled_example_does_not_arm_the_upload_button():
+    """The fallback run never touched the operator's file."""
+
+    async def main() -> bool:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen._remote_done(
+                {
+                    "ok": True,
+                    "filename": "",
+                    "facts": _target_facts(),
+                    "summary": _summary(ai_review=None),
+                },
+                "verify",
+                "",
+            )
+            await pilot.pause()
+            return screen.query_one("#run-converted", Button).disabled
+
+    assert asyncio.run(main()) is True
+
+
+def test_a_local_migration_that_returns_a_converted_file_arms_the_upload_button():
+    async def main() -> tuple[bool, bool]:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            button = screen.query_one("#run-converted", Button)
+            before = button.disabled
+            screen._local_migration_done(
+                _summary(ai_review=None), "m.py", "/tmp/m.py", "print('original')\n", ""
+            )
+            await pilot.pause()
+            return before, button.disabled
+
+    before, after = asyncio.run(main())
+    assert before is True
+    assert after is False
 
 
 
@@ -433,90 +570,6 @@ def test_metrics_widget_says_not_measured_rather_than_zero():
 # --- dependency section in results ------------------------------------------
 
 
-def test_results_render_a_dependency_checklist():
-    async def main() -> str:
-        app = _Host()
-        async with app.run_test() as pilot:
-            screen = app.query_one(ResultsScreen)
-            screen.show_dependency_install(
-                [
-                    {
-                        "key": "torch",
-                        "label": "PyTorch (ROCm)",
-                        "ok": True,
-                        "output": "",
-                        "error": "",
-                    },
-                    {
-                        "key": "hipcc",
-                        "label": "hipcc (ROCm compiler)",
-                        "ok": False,
-                        "output": "",
-                        "error": "not apt-based",
-                    },
-                ],
-                {
-                    "ok": True,
-                    "os_name": "Ubuntu 24.04.5 LTS",
-                    "tools": {"hipcc": "/opt/rocm/bin/hipcc"},
-                    "python_path": "/usr/bin/python3",
-                },
-            )
-            await pilot.pause()
-            return "\n".join(str(widget.render()) for widget in screen.query(Static))
-
-    text = asyncio.run(main())
-    assert "Dependency check" in text
-    assert "PyTorch (ROCm): installed" in text
-    assert "hipcc (ROCm compiler): needs attention" in text
-
-
-# --- copyable results -------------------------------------------------------
-
-
-def test_copy_results_puts_the_displayed_text_on_the_clipboard():
-    async def main():
-        app = _Host()
-        async with app.run_test() as pilot:
-            screen = app.query_one(ResultsScreen)
-            screen.show_dependency_install(
-                [
-                    {
-                        "key": "torch",
-                        "label": "PyTorch (ROCm)",
-                        "ok": True,
-                        "output": "",
-                        "error": "",
-                    }
-                ],
-                {"ok": True, "python_path": "/usr/bin/python3"},
-            )
-            await pilot.pause()
-            await pilot.click("#copy-results")
-            await pilot.pause()
-            return app._clipboard
-
-    text = asyncio.run(main())
-    assert text
-    assert "PyTorch (ROCm): installed" in text
-
-
-def test_copy_results_button_is_hidden_until_there_are_results():
-    async def main():
-        app = _Host()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            empty = app.query_one("#result-tools").display
-            screen = app.query_one(ResultsScreen)
-            screen.show_dependency_install([], {"ok": True})
-            await pilot.pause()
-            return empty, app.query_one("#result-tools").display
-
-    empty, after = asyncio.run(main())
-    assert empty is False
-    assert after is True
-
-
 def test_results_render_a_red_missing_dependency_error():
     dep = next(
         item
@@ -571,30 +624,6 @@ def _target_facts(**overrides):
     return TargetFacts(**base).as_dict()
 
 
-def test_install_button_only_shows_for_a_checked_and_lacking_target():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            screen = app.query_one(TargetScreen)
-            await pilot.pause()
-            button = screen.query_one("#install-deps", Button)
-            before = (button.display, button.disabled)
-
-            screen._connected_facts = _target_facts(torch_version="")
-            screen._refresh_dependency_button()
-            await pilot.pause()
-            missing = (button.display, button.disabled)
-
-            screen._connected_facts = _target_facts(torch_version="2.4.0+rocm6.2")
-            screen._refresh_dependency_button()
-            await pilot.pause()
-            complete = (button.display, button.disabled)
-            return before, missing, complete
-
-    before, missing, complete = asyncio.run(main())
-    assert before == (False, True)
-    assert missing == (True, False)
-    assert complete == (False, True)
 
 
 def test_a_python_run_is_blocked_and_names_pytorch():
@@ -617,7 +646,7 @@ def test_a_python_run_is_blocked_and_names_pytorch():
     assert keys == ["torch"]
     assert active == "results"
     assert "PyTorch" in blob
-    assert "Install missing dependencies" in blob
+    assert "Install it on the target" in blob
 
 
 def test_a_cu_run_and_verification_are_not_blocked_by_missing_torch():
@@ -723,9 +752,7 @@ def test_losing_the_live_stream_marks_the_target_disconnected():
             await pilot.pause()
             screen._connected_facts = _target_facts(torch_version="")
             screen._connected_fields = {"kind": "ssh", "host": "h"}
-            screen._refresh_dependency_button()
             await pilot.pause()
-            shown_before = screen.query_one("#install-deps", Button).display
             screen._handle_metrics_loss(
                 "The live connection to h was closed by the target."
             )
@@ -733,27 +760,16 @@ def test_losing_the_live_stream_marks_the_target_disconnected():
             panel = screen._gpu_panel()
             status = screen.query_one("#status", Static)
             return (
-                shown_before,
                 screen._connected_facts,
                 screen._connected_fields,
                 str(panel.render()),
                 str(status.render()),
-                screen.query_one("#install-deps", Button).display,
             )
 
-    (
-        shown_before,
-        facts,
-        fields,
-        panel_text,
-        status_text,
-        shown_after,
-    ) = asyncio.run(main())
-    assert shown_before is True
+    facts, fields, panel_text, status_text = asyncio.run(main())
     assert facts is None and fields is not None
     assert "CONNECTION LOST" in panel_text
     assert "connection lost" in status_text.lower()
-    assert shown_after is False
 
 
 def _cloud(app: GraftTUI) -> None:
@@ -1042,6 +1058,58 @@ def test_switching_location_while_reconnecting_cancels_the_probe(monkeypatch):
 
 
 
+# --- detect token gating ----------------------------------------------------
+# Token discovery is only offered once a real Jupyter Server URL is typed; the
+# token itself still arrives by SSH once the URL names the server.
+
+
+def test_detect_token_is_disabled_until_a_valid_server_url_is_entered():
+    async def main():
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            field = screen.query_one("#jupyter-host", Input)
+            button = screen.query_one("#detect-token", Button)
+
+            field.value = ""
+            screen._refresh_detect_token_button()
+            await pilot.pause()
+            empty = button.disabled
+
+            field.value = "gpu.example.com"
+            screen._refresh_detect_token_button()
+            await pilot.pause()
+            bare = button.disabled
+
+            field.value = "https://gpu.example.com/lab"
+            screen._refresh_detect_token_button()
+            await pilot.pause()
+            valid = button.disabled
+            return empty, bare, valid
+
+    empty, bare, valid = asyncio.run(main())
+    # No URL or a bare host keeps discovery off; a full URL turns it on.
+    assert empty is True
+    assert bare is True
+    assert valid is False
+
+
+def test_detect_token_without_a_url_reports_the_missing_server():
+    async def main() -> str:
+        app = GraftTUI()
+        async with app.run_test(size=(140, 48)) as pilot:
+            screen = app.query_one(TargetScreen)
+            await pilot.pause()
+            screen.query_one("#jupyter-host", Input).value = ""
+            screen._detect_jupyter_token()
+            await pilot.pause()
+            return str(screen.query_one("#status", Static).render())
+
+    status = asyncio.run(main())
+    assert "Jupyter Server URL" in status
+
+
 # --- app-level GPU dock ------------------------------------------------------
 # The animation and live readings live in one dock fixed at the upper right of
 # every screen, not inside the workspace tab, so switching tabs must not take
@@ -1097,101 +1165,9 @@ def test_the_gpu_dock_shrinks_then_hides_as_the_terminal_narrows():
     assert "hidden" in hidden
 
 
-# --- right-click copy popup --------------------------------------------------
-# Highlighting works through Textual's built-in selection; the popup turns a
-# right-click into a copy that really reaches the clipboard.
-
-
-def test_right_clicking_a_selection_opens_the_copy_popup_and_copies():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            screen = app.query_one(ResultsScreen)
-            screen.show_dependency_install(
-                [{"key": "hipcc", "label": "hipcc (ROCm compiler)", "ok": True}],
-                {"ok": True, "python_path": "/usr/bin/python3"},
-            )
-            app.query_one("#main-tabs").active = "results"
-            await pilot.pause()
-            card = next(iter(screen.query(".result-card")))
-            await pilot.mouse_down(card, offset=(0, 0))
-            await pilot.mouse_up(card, offset=(12, 0))
-            await pilot.pause()
-            selected = app.screen.get_selected_text()
-            await pilot.click(card, button=3)
-            await pilot.pause()
-            popup = app.screen
-            return selected, type(popup).__name__, app._clipboard
-
-    selected, popup_name, clipboard_before = asyncio.run(main())
-    # The drag selected the head of the card's text, and the right-click
-    # opened the popup over it.
-    assert selected and "hipcc" in selected
-    assert popup_name == "CopyPopup"
-    # A right-click alone must not write the clipboard; only the button does.
-    assert clipboard_before in (None, "")
-
-
-def test_the_copy_popup_button_puts_the_selection_on_the_clipboard():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            screen = app.query_one(ResultsScreen)
-            screen.show_error("Example", "hipcc missing on the target")
-            app.query_one("#main-tabs").active = "results"
-            await pilot.pause()
-            card = next(iter(screen.query(".result-card")))
-            await pilot.mouse_down(card, offset=(0, 0))
-            await pilot.mouse_up(card, offset=(6, 0))
-            await pilot.pause()
-            selected = app.screen.get_selected_text()
-            await pilot.click(card, button=3)
-            await pilot.pause()
-            await pilot.click("#copy-popup-copy")
-            await pilot.pause()
-            return selected, app._clipboard
-
-    selected, clipboard = asyncio.run(main())
-    assert selected
-    # The button put exactly the highlighted text on the clipboard.
-    assert clipboard == selected
-
-
-def test_the_copy_popup_shows_the_selection_size_and_dismisses():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            app.push_screen(CopyPopup("alpha beta gamma"))
-            await pilot.pause()
-            popup = app.screen
-            count = str(popup.query_one("#copy-popup-count").render())
-            text = str(popup.query_one("#copy-popup-text").render())
-            await pilot.press("escape")
-            await pilot.pause()
-            return count, text, type(app.screen).__name__
-
-    count, text, after = asyncio.run(main())
-    assert "16 characters" in count
-    assert "alpha beta gamma" in text
-    assert after != "CopyPopup"
-
-
-def test_a_long_selection_is_clamped_in_the_preview_but_not_lost():
-    from graft.tui.screens.copy_popup import preview_text
-
-    long = "x" * 5000
-    preview = preview_text(long)
-    assert len(preview) < len(long)
-    assert "3800 more characters" in preview
-    assert preview_text("short") == "short"
-
-
 # --- dependency overlay ------------------------------------------------------
-# Connecting now checks the target immediately and offers the install with
-# live progress, instead of hiding the gap until an operation fails.
+# Connecting checks the target immediately and reports what it is missing, so
+# the gap is visible before an operation fails.
 
 
 def test_a_local_probe_opens_the_dependency_overlay():
@@ -1228,25 +1204,22 @@ def test_a_remote_probe_opens_the_dependency_overlay_and_lists_missing_tools():
             await pilot.pause()
             overlay = app.screen
             if not isinstance(overlay, DependencyOverlay):
-                return type(overlay).__name__, "", "", False
+                return type(overlay).__name__, "", ""
             rows = {
                 dep.key: str(overlay.query_one(f"#dep-{dep.key}").render())
                 for dep in overlay._deps
             }
-            install = overlay.query_one("#deps-install", Button)
             return (
                 type(overlay).__name__,
                 rows.get("hipify-perl", ""),
                 rows.get("hipcc", ""),
-                install.disabled,
             )
 
-    name, hipify_row, hipcc_row, disabled = asyncio.run(main())
+    name, hipify_row, hipcc_row = asyncio.run(main())
     assert name == "DependencyOverlay"
-    # hipify-perl is missing and installable; hipcc is present.
+    # hipify-perl is missing; hipcc is present.
     assert "missing" in hipify_row and "rocm-hip-sdk" in hipify_row
     assert hipcc_row.startswith("ok")
-    assert disabled is False
 
 
 def test_a_probe_of_a_fully_equipped_target_does_not_open_the_overlay():
@@ -1293,112 +1266,12 @@ def test_verify_shows_its_results_instead_of_an_overlay():
     assert active == "results"
 
 
-def test_the_dependency_overlay_reports_live_install_progress():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            overlay = DependencyOverlay(
-                _target_facts(tools={"hipcc": "/x"}, torch_version="")
-            )
-            app.push_screen(overlay)
-            await pilot.pause()
-            # Drive the same updates the worker posts, as the UI would see
-            # them: a tool starts installing, then its outcome arrives.
-            overlay._mark_installing("hipify-perl", "Installing hipify-perl…")
-            await pilot.pause()
-            during = str(overlay.query_one("#dep-hipify-perl").render())
-            status_during = str(overlay.query_one("#deps-status").render())
-            overlay._mark_result(
-                {"key": "hipify-perl", "label": "hipify-perl", "ok": True}
-            )
-            await pilot.pause()
-            after = str(overlay.query_one("#dep-hipify-perl").render())
-            status_after = str(overlay.query_one("#deps-status").render())
-            progress = overlay.query_one("#deps-progress", ProgressBar)
-            return during, status_during, after, status_after, progress.progress
-
-    during, status_during, after, status_after, progress = asyncio.run(main())
-    assert "installing" in during
-    assert "Installing hipify-perl" in status_during
-    assert "ok" in after
-    assert "Installed hipify-perl" in status_after
-    assert progress >= 1
 
 
-def test_a_failed_install_does_not_leave_rows_claiming_progress():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            overlay = DependencyOverlay(_target_facts(tools={}, torch_version=""))
-            app.push_screen(overlay)
-            await pilot.pause()
-            overlay._mark_installing("hipify-perl", "Installing hipify-perl…")
-            await pilot.pause()
-            overlay._install_failed("the transport closed")
-            await pilot.pause()
-            row = str(overlay.query_one("#dep-hipify-perl").render())
-            status = str(overlay.query_one("#deps-status").render())
-            install = overlay.query_one("#deps-install", Button)
-            return row, status, install.disabled
-
-    row, status, disabled = asyncio.run(main())
-    # The row falls back to "missing", never stuck on "installing…".
-    assert "installing" not in row
-    assert "missing" in row
-    assert "install failed" in status
-    # The install stays available: nothing was installed, so it can be retried.
-    assert disabled is False
 
 
-def test_the_dependency_overlay_does_not_install_without_the_button():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            overlay = DependencyOverlay(_target_facts(tools={}))
-            app.push_screen(overlay)
-            await pilot.pause()
-            before = overlay._states
-            # Escape closes an idle overlay without running anything.
-            await pilot.press("escape")
-            await pilot.pause()
-            return before, type(app.screen).__name__
-
-    before, after = asyncio.run(main())
-    assert all(state != "installing" for state in before.values())
-    assert after != "DependencyOverlay"
 
 
-def test_an_install_refreshes_the_workspace_facts():
-    async def main():
-        app = GraftTUI()
-        async with app.run_test(size=(140, 48)) as pilot:
-            await pilot.pause()
-            screen = app.query_one(TargetScreen)
-            screen._connected_fields = _ssh_fields()
-            screen._connected_facts = _target_facts(torch_version="")
-            screen._show_dependency_overlay(
-                screen._connected_facts,
-                fields=screen._connected_fields,
-                label="gpu.example.com",
-            )
-            await pilot.pause()
-            overlay = app.screen
-            refreshed = _target_facts(torch_version="2.4.0+rocm6.2")
-            overlay._install_done([], refreshed)
-            await pilot.pause()
-            return (
-                screen._connected_facts.get("torch_version"),
-                screen.query_one("#install-deps", Button).display,
-            )
-
-    torch_version, button_shown = asyncio.run(main())
-    assert torch_version == "2.4.0+rocm6.2"
-    # With torch present there is nothing left to install, so the workspace
-    # install button hides again.
-    assert button_shown is False
 
 
 # --- numbered source preview -------------------------------------------------
@@ -1441,12 +1314,15 @@ def test_the_source_comparison_panes_are_numbered_too():
             screen = app.query_one(ResultsScreen)
             screen.show_local(_summary(), "m.py", "/tmp/m.py", "print('original')\n")
             await pilot.pause()
-            blob = "\n".join(
-                str(widget.render()) for widget in screen.query(Static)
+            screen._show_source_comparison()
+            await pilot.pause()
+            popup = app.screen
+            return type(popup).__name__, "\n".join(
+                str(widget.render()) for widget in popup.query(Static)
             )
-            return blob
 
-    blob = asyncio.run(main())
+    popup_name, blob = asyncio.run(main())
+    assert popup_name == "SourceComparePopup"
     assert "1 │ print('original')" in blob
     # The converted pane is numbered as well, not left as raw text.
     assert "1 │ print('converted')" in blob
@@ -1487,7 +1363,6 @@ def test_the_guide_names_the_buttons_it_tells_you_to_press():
         "Detect token",
         "Verify on GPU",
         "Upload & run converted file",
-        "Install missing dependencies",
         "Save converted file",
     ):
         assert label in steps, label

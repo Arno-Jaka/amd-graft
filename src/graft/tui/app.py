@@ -9,7 +9,6 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
-from graft.tui.screens.copy_popup import CopyPopup
 from graft.tui.screens.instructions import InstructionsScreen
 from graft.tui.screens.loading import LoadingOverlay
 from graft.tui.screens.results import ResultsScreen
@@ -69,51 +68,6 @@ class GraftTUI(App):
         color: #70ddc8;
         text-style: bold;
         text-align: center;
-    }
-
-    CopyPopup {
-        align: center middle;
-        background: #050a12 78%;
-    }
-
-    #copy-popup-card {
-        width: 76;
-        max-width: 92%;
-        height: auto;
-        max-height: 84%;
-        padding: 1 2;
-        border: round #83bfff;
-        background: #101a29;
-    }
-
-    #copy-popup-eyebrow {
-        color: #83bfff;
-        text-style: bold;
-    }
-
-    #copy-popup-count {
-        margin-top: 1;
-        color: #9aabbd;
-    }
-
-    #copy-popup-scroll {
-        height: auto;
-        max-height: 20;
-        margin-top: 1;
-        padding: 0 1;
-        background: #0a111c;
-        scrollbar-color: #35526a;
-        scrollbar-background: #0a111c;
-    }
-
-    #copy-popup-text {
-        color: #dbe9f4;
-    }
-
-    #copy-popup-actions {
-        height: 3;
-        margin-top: 1;
-        layout: horizontal;
     }
 
     AIConversionPopup {
@@ -182,7 +136,68 @@ class GraftTUI(App):
     }
 
     #ai-assist-actions,
-    #ai-result-actions {
+    #ai-result-actions,
+    #compare-actions {
+        height: 3;
+        margin-top: 1;
+        layout: horizontal;
+    }
+
+    SourceComparePopup {
+        align: center middle;
+        background: #050a12 78%;
+    }
+
+    #compare-popup-card {
+        width: 96;
+        max-width: 96%;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round #83bfff;
+        background: #101a29;
+    }
+
+    #compare-popup-eyebrow {
+        color: #83bfff;
+        text-style: bold;
+    }
+
+    #compare-popup-title {
+        margin-top: 1;
+        color: #dbe9f4;
+    }
+
+    #compare-popup-note {
+        margin-top: 1;
+        color: #e6c07b;
+    }
+
+    #compare-popup-scroll {
+        height: auto;
+        max-height: 30;
+        margin-top: 1;
+        padding: 0 1;
+        background: #0a111c;
+        scrollbar-color: #35526a;
+        scrollbar-background: #0a111c;
+    }
+
+    .compare-popup-section {
+        margin-top: 1;
+        color: #83bfff;
+        text-style: bold;
+    }
+
+    .compare-popup-path {
+        color: #9aabbd;
+    }
+
+    .compare-popup-code {
+        color: #dbe9f4;
+    }
+
+    #compare-popup-actions {
         height: 3;
         margin-top: 1;
         layout: horizontal;
@@ -242,22 +257,11 @@ class GraftTUI(App):
         color: #ff9ba1;
     }
 
-    #deps-progress {
-        height: 2;
-        margin-top: 1;
-    }
-
     #deps-status {
         height: auto;
         min-height: 1;
         margin-top: 1;
         color: #9aabbd;
-    }
-
-    #deps-actions {
-        height: 3;
-        margin-top: 1;
-        layout: horizontal;
     }
 
     LoadingOverlay {
@@ -785,16 +789,6 @@ class GraftTUI(App):
         color: #ff9ba1;
     }
 
-    #result-tools {
-        height: 3;
-        margin-top: 1;
-    }
-
-    #copy-results {
-        width: auto;
-        min-width: 20;
-    }
-
     #source-editor-grid {
         height: auto;
         grid-size: 2;
@@ -1039,23 +1033,6 @@ class GraftTUI(App):
         dock.set_class(64 <= width < 88, "tiny")
         dock.set_class(88 <= width < 112, "narrow")
         dock.set_class(height < 28, "short")
-
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        """Right-clicking highlighted text offers a copy popup.
-
-        Textual owns the highlight: dragging with the left button selects
-        text in any Static, and `Screen.get_selected_text()` returns it. The
-        selection is read on MouseDown because the Screen clears it on the
-        MouseUp that completes the right-click, so a handler on MouseUp
-        would find nothing to copy.
-        """
-        if event.button != 3:
-            return
-        selected = self.screen.get_selected_text()
-        if not selected:
-            return
-        event.stop()
-        self.push_screen(CopyPopup(selected))
 
     def show_gpu_facts(self, method: str, *args) -> None:
         """Drive the fixed GPU dock from any screen.

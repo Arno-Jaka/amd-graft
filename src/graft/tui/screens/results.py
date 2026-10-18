@@ -199,6 +199,7 @@ class ResultsScreen(VerticalScroll):
         # buttons can act on the same source the report describes.
         self._original_source = ""
         self._source_filename = "converted.py"
+        self._source_path = ""
         self._ai_options: dict[str, str] = {}
         self._ai_result: dict[str, Any] | None = None
         self._ai_converting = False
@@ -207,8 +208,6 @@ class ResultsScreen(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Static("Results", id="result-heading")
         yield Static("", id="result-summary")
-        with Horizontal(id="result-tools"):
-            yield Button("📋", id="copy-results", classes="icon-button")
         with Horizontal(id="save-row"):
             yield Input(placeholder="Save converted file to…", id="output-path")
             yield Button("Save converted file", id="save-output")
@@ -220,39 +219,14 @@ class ResultsScreen(VerticalScroll):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-output":
             self._save_converted()
-        elif event.button.id == "copy-results":
-            self._copy_results()
         elif event.button.id == "ai-convert":
             self._start_ai_conversion()
         elif event.button.id == "ai-preview":
             self._preview_ai()
         elif event.button.id == "ai-run":
             self._run_ai_on_gpu()
-
-    def _copy_results(self) -> None:
-        text = self._copyable_text()
-        if not text.strip():
-            return
-        self.app.copy_to_clipboard(text)
-        button = self.query_one("#copy-results", Button)
-        button.label = "Copied ✓"
-        self.set_timer(1.5, self._reset_copy_label)
-
-    def _reset_copy_label(self) -> None:
-        if self.is_mounted:
-            self.query_one("#copy-results", Button).label = "📋"
-
-    def _copyable_text(self) -> str:
-        """The currently displayed results as one plain-text block."""
-        chunks: list[str] = []
-        for widget in self.query(Static):
-            try:
-                text = str(widget.render())
-            except Exception:
-                continue
-            if text.strip():
-                chunks.append(text)
-        return "\n".join(chunks)
+        elif event.button.id == "compare-source":
+            self._show_source_comparison()
 
     def _save_converted(self) -> None:
         target = self.query_one("#output-path", Input).value.strip()
@@ -277,6 +251,26 @@ class ResultsScreen(VerticalScroll):
             return
         status.update(f"Saved converted file · {path}")
         status.set_classes("result-summary success")
+
+    def _show_source_comparison(self) -> None:
+        """Open the original and converted files in an overlay.
+
+        The report renders a summary of the comparison; both files live in the
+        popup so a long port does not bury the measured evidence above it.
+        """
+        from graft.tui.screens.compare_popup import SourceComparePopup
+
+        if not self._original_source.strip() and not self._converted_source.strip():
+            self.notify("There is no source to compare.", severity="warning")
+            return
+        self.app.push_screen(
+            SourceComparePopup(
+                self._source_filename,
+                self._original_source,
+                self._converted_source,
+                source_path=self._source_path,
+            )
+        )
 
     # ------------------------------------------------------------------
     # internal rendering helpers
@@ -303,13 +297,11 @@ class ResultsScreen(VerticalScroll):
         self._ai_result = None
         self._ai_converting = False
         self.query_one("#save-row").display = False
-        self.query_one("#result-tools").display = False
         self.query_one("#output-path", Input).value = ""
         self._body().remove_children()
 
-    def _mount_body(self, *widgets: Any, copyable: bool = True) -> None:
+    def _mount_body(self, *widgets: Any) -> None:
         self._body().mount(*widgets)
-        self.query_one("#result-tools").display = copyable
 
     # ------------------------------------------------------------------
     # public views
@@ -326,7 +318,6 @@ class ResultsScreen(VerticalScroll):
                 markup=False,
                 classes="result-card",
             ),
-            copyable=False,
         )
 
     def show_source_preview(
@@ -423,6 +414,7 @@ class ResultsScreen(VerticalScroll):
         self._converted_source = str(summary.get("converted_source") or "")
         self._original_source = original_source or ""
         self._source_filename = filename or "converted.py"
+        self._source_path = source_path or ""
         self._ai_options = dict(ai_options or {})
 
         verdict = str(conversion.get("verdict") or "").lower()
@@ -692,15 +684,24 @@ class ResultsScreen(VerticalScroll):
             *ai_section,
             *ai_assist,
             Static("SOURCE COMPARISON", markup=False, classes="result-section"),
-            Static(f"original · {source_path}", markup=False, classes="editor-title"),
-            Static(numbered_source(original_source), markup=False, classes="source-pane"),
-            Static("converted", markup=False, classes="editor-title"),
             Static(
-                numbered_source(self._converted_source)
-                if self._converted_source
-                else "not available",
+                f"original · {source_path or filename} · "
+                f"{len(original_source.splitlines())} line(s)",
                 markup=False,
-                classes="source-pane",
+                classes="result-kv",
+            ),
+            Static(
+                (
+                    f"converted · {len(self._converted_source.splitlines())} line(s)"
+                    if self._converted_source
+                    else "converted · not available"
+                ),
+                markup=False,
+                classes="result-kv",
+            ),
+            Horizontal(
+                Button("View original vs converted", id="compare-source"),
+                id="compare-actions",
             ),
         )
 
@@ -1017,26 +1018,6 @@ class ResultsScreen(VerticalScroll):
             "success" if ok else "error",
         )
         self._mount_body(self._remote_body(result, note))
-
-    def show_dependency_install(
-        self, results: list[dict[str, Any]], facts: dict[str, Any] | None
-    ) -> None:
-        self._reset()
-        failed = [item for item in results if not item.get("ok")]
-        tone = "warning" if failed else "success"
-        self._set_heading("Dependency check", tone)
-        lines: list[str] = []
-        if not results:
-            lines.append("All required dependencies are already present.")
-        for item in results:
-            label = item.get("label") or item.get("key") or "dependency"
-            lines.append(f"{label}: {'installed' if item.get('ok') else 'needs attention'}")
-            if item.get("output"):
-                lines.append(f"  {item['output']}")
-            if item.get("error"):
-                lines.append(f"  {item['error']}")
-        lines.extend(_dependency_lines(facts or {}))
-        self._mount_body(Static("\n".join(lines), markup=False, classes="result-card"))
 
     def _remote_body(self, result: dict[str, Any], note: str = "") -> Static:
         lines: list[str] = []

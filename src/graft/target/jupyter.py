@@ -61,6 +61,14 @@ PING_INTERVAL_S = 10
 PING_TIMEOUT_S = 5
 MAX_FRAMES = 200_000
 
+# A fresh server, a dropped packet, or a moment of load can refuse the very
+# first connection. Those blips are retried a couple of times with a short
+# backoff rather than failing the whole operation on one bad handshake.
+# Read timeouts and HTTP errors are NOT retried: a stalled command has its own
+# budget, and repeating a slow request only makes it slower.
+CONNECT_RETRIES = 3
+CONNECT_BACKOFF_S = 1.5
+
 
 def supports_terminal_api(version: str) -> bool:
     """True when a Jupyter version has the terminal API Graft needs.
@@ -156,28 +164,42 @@ class JupyterTransport:
             )
 
     def _request(self, method: str, path: str, *, what: str, timeout: float, **kwargs):
-        try:
-            response = self.session.request(
-                method,
-                self._url(path),
-                headers=self._headers(),
-                timeout=timeout,
-                **kwargs,
-            )
-        except requests.exceptions.ConnectionError as error:
-            raise TransportError(
-                f"Could not reach {self.spec.safe_label()}. Check the host and port."
-            ) from error
-        except requests.exceptions.Timeout as error:
-            raise TransportError(
-                f"Timed out reaching {self.spec.safe_label()} while {what}."
-            ) from error
-        except requests.exceptions.RequestException as error:
-            raise TransportError(
-                f"Jupyter request failed while {what}: {error}"
-            ) from error
-        self._check(response, what)
-        return response
+        # A connection that never established (ConnectTimeout is a subclass of
+        # ConnectionError) is safe and worth to retry: nothing was sent, so no
+        # server-side effect can be duplicated. Anything else fails at once.
+        last_error: requests.exceptions.ConnectionError | None = None
+        for attempt in range(1, CONNECT_RETRIES + 1):
+            try:
+                response = self.session.request(
+                    method,
+                    self._url(path),
+                    headers=self._headers(),
+                    timeout=timeout,
+                    **kwargs,
+                )
+            except requests.exceptions.ConnectionError as error:
+                last_error = error
+                if attempt < CONNECT_RETRIES:
+                    time.sleep(CONNECT_BACKOFF_S * attempt)
+                    continue
+                raise TransportError(
+                    f"Could not reach {self.spec.safe_label()}. Check the host and port."
+                ) from error
+            except requests.exceptions.Timeout as error:
+                raise TransportError(
+                    f"Timed out reaching {self.spec.safe_label()} while {what}."
+                ) from error
+            except requests.exceptions.RequestException as error:
+                raise TransportError(
+                    f"Jupyter request failed while {what}: {error}"
+                ) from error
+            self._check(response, what)
+            return response
+        # Unreachable: the loop either returns or raises. Kept for the type
+        # checker, which cannot see that every path above is terminal.
+        raise TransportError(
+            f"Could not reach {self.spec.safe_label()}. Check the host and port."
+        ) from last_error
 
     def _contents_path(self, remote_path: str) -> str:
         """Map an absolute remote path to a Jupyter contents API path.
@@ -327,24 +349,38 @@ class JupyterTransport:
         )
 
     def _open_socket(self, name: str, budget: float):
-        """Open the terminal websocket, mapping transport failures for the UI."""
-        try:
-            return websocket.create_connection(
-                self._ws_url(name),
-                header=[f"{TOKEN_HEADER}: token {self.spec.token}"],
-                timeout=max(1.0, min(budget, CONNECT_TIMEOUT_S)),
-                # Jupyter's own origin check rejects the Host header a raw
-                # socket sends unless an origin is supplied.
-                origin=self.base,
-                # Ping the peer so a silently dropped server raises instead of
-                # leaving the reader waiting forever.
-                ping_interval=PING_INTERVAL_S,
-                ping_timeout=PING_TIMEOUT_S,
-            )
-        except (OSError, websocket.WebSocketException) as error:
-            raise TransportError(
-                f"Could not open a terminal on {self.spec.safe_label()}: {error}"
-            ) from error
+        """Open the terminal websocket, mapping transport failures for the UI.
+
+        A refused or dropped handshake is retried briefly: the terminal itself
+        already exists, so re-attempting the connection cannot create anything
+        twice. Only after the retries does the failure surface.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, CONNECT_RETRIES + 1):
+            try:
+                return websocket.create_connection(
+                    self._ws_url(name),
+                    header=[f"{TOKEN_HEADER}: token {self.spec.token}"],
+                    timeout=max(1.0, min(budget, CONNECT_TIMEOUT_S)),
+                    # Jupyter's own origin check rejects the Host header a raw
+                    # socket sends unless an origin is supplied.
+                    origin=self.base,
+                    # Ping the peer so a silently dropped server raises instead
+                    # of leaving the reader waiting forever.
+                    ping_interval=PING_INTERVAL_S,
+                    ping_timeout=PING_TIMEOUT_S,
+                )
+            except (OSError, websocket.WebSocketException) as error:
+                last_error = error
+                if attempt < CONNECT_RETRIES:
+                    time.sleep(CONNECT_BACKOFF_S * attempt)
+                    continue
+                raise TransportError(
+                    f"Could not open a terminal on {self.spec.safe_label()}: {error}"
+                ) from error
+        raise TransportError(
+            f"Could not open a terminal on {self.spec.safe_label()}: {last_error}"
+        ) from last_error
 
     def _drive(self, name: str, script: str, timeout_s: int | None) -> str:
         """Send the script and read the transcript back under a real deadline.

@@ -78,6 +78,10 @@ class TargetScreen(Vertical):
         super().__init__(*args, **kwargs)
         self._converted_source = ""
         self._converted_filename = ""
+        # Whether the converted file currently held came from a run that
+        # actually succeeded. The upload button is gated on this, not merely on
+        # a file being present, so nothing unverified can be pushed to a GPU.
+        self._converted_verified = False
         # The source chosen for a remote verify run, kept so the results screen
         # can render the original next to the remote conversion.
         self._verify_original_source = ""
@@ -174,11 +178,6 @@ class TargetScreen(Vertical):
                     yield Button(
                         "Upload & run converted file",
                         id="run-converted",
-                        disabled=True,
-                    )
-                    yield Button(
-                        "Install missing dependencies",
-                        id="install-deps",
                         disabled=True,
                     )
                 yield Static(
@@ -341,7 +340,6 @@ class TargetScreen(Vertical):
         # is_mounted is False inside on_mount, so defer the style-only
         # updates until after the first refresh.
         self.call_after_refresh(self._apply_layout)
-        self.call_after_refresh(self._refresh_dependency_button)
         self.call_after_refresh(self._refresh_reconnect_button)
         # The workspace opens on the local machine, so its readings are the
         # first thing the panel can show without any connection.
@@ -389,6 +387,8 @@ class TargetScreen(Vertical):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id in {"ssh-host", "ssh-username", "jupyter-host"}:
             self._gpu_status("set_waiting", "DETECT AFTER CHANGING TARGET")
+        if event.input.id == "jupyter-host":
+            self._refresh_detect_token_button()
         elif event.input.id == "source-path":
             if self._preview_timer is not None:
                 self._preview_timer.stop()
@@ -416,6 +416,7 @@ class TargetScreen(Vertical):
         is_jupyter = self.query_one("#transport-select", Select).value == "jupyter"
         self.query_one("#ssh-config", Vertical).display = is_remote and not is_jupyter
         self.query_one("#jupyter-config", Vertical).display = is_remote and is_jupyter
+        self._refresh_detect_token_button()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -425,7 +426,6 @@ class TargetScreen(Vertical):
             self._set_status("Remote GPU disconnected", tone="info")
             self._connected_fields = None
             self._connected_facts = None
-            self._refresh_dependency_button()
             self._refresh_reconnect_button()
             self._start_metrics("local")
             return
@@ -456,8 +456,6 @@ class TargetScreen(Vertical):
             self._start_remote("verify")
         elif button_id == "run-converted":
             self._start_remote_file()
-        elif button_id == "install-deps":
-            self._start_dependency_install()
         elif button_id == "detect-token":
             self._detect_jupyter_token()
 
@@ -489,9 +487,26 @@ class TargetScreen(Vertical):
     def _invalidate_converted_file(self) -> None:
         self._converted_source = ""
         self._converted_filename = ""
+        self._converted_verified = False
         if not self.is_mounted:
             return
         self.query_one("#run-converted", Button).disabled = True
+
+    def _set_converted_file(self, source: str, filename: str, *, verified: bool) -> None:
+        """Publish the converted file for upload, or drop it as unverified.
+
+        ``verified`` means the run that produced this file completed: a local
+        migration that returned a converted source, or a remote verification
+        whose own migration succeeded on the target. Anything else clears the
+        file so "Upload & run converted file" cannot act on a result nobody
+        checked.
+        """
+        usable = bool(verified) and bool(filename) and bool(source.strip())
+        self._converted_source = source if usable else ""
+        self._converted_filename = filename if usable else ""
+        self._converted_verified = usable
+        if self.is_mounted:
+            self.query_one("#run-converted", Button).disabled = not usable
 
     def _preview_source_path(
         self, path_text: str, *, switch_to_results: bool = False
@@ -532,8 +547,8 @@ class TargetScreen(Vertical):
                     f"Source loaded · {path.name} · ready to convert and review",
                     tone="info",
                 )
-        if switch_to_results:
-            self.app.query_one("#main-tabs", TabbedContent).active = "results"
+                if switch_to_results:
+                    self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
     def convert_selected_file(self) -> None:
         """Allow the comparison page to start a conversion from its editor."""
@@ -737,9 +752,10 @@ class TargetScreen(Vertical):
         return fields
 
     def _start_remote_file(self) -> None:
-        if not self._converted_source or not self._converted_filename:
+        if not self._converted_verified:
             self._show_error(
-                "Run a migration first so there is a converted file to upload."
+                "Run a migration or verify on GPU first so there is a converted "
+                "file that has actually completed to upload."
             )
             return
         suffix = Path(self._converted_filename).suffix.lower()
@@ -841,6 +857,30 @@ class TargetScreen(Vertical):
                 "Graft could not upload or verify the AI-converted file. Check the target details and try again.",
             )
 
+    @staticmethod
+    def _valid_jupyter_url(value: str) -> bool:
+        """True when the value parses as a Jupyter Server base URL.
+
+        The Server URL is the base the browser opens, up to (but not
+        including) ``?token=``. It must carry an http/https scheme and a
+        hostname; anything else is not a URL the token discovery can be
+        gated on.
+        """
+        value = value.strip()
+        if not value or "://" not in value:
+            return False
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+    def _refresh_detect_token_button(self) -> None:
+        """Only offer token discovery once a real Server URL has been typed."""
+        if not self.is_mounted:
+            return
+        value = self.query_one("#jupyter-host", Input).value
+        self.query_one("#detect-token", Button).disabled = not self._valid_jupyter_url(
+            value
+        )
+
     def _remote_host(self) -> str:
         """The machine to SSH into for token discovery.
 
@@ -859,6 +899,13 @@ class TargetScreen(Vertical):
 
     def _detect_jupyter_token(self) -> None:
         """Log into the host over SSH and load the Jupyter token it finds."""
+        server_url = self.query_one("#jupyter-host", Input).value.strip()
+        if not self._valid_jupyter_url(server_url):
+            self._show_error(
+                "Enter the Jupyter Server URL (e.g. https://host/lab) so Graft "
+                "knows which server's token to look for."
+            )
+            return
         host = self._remote_host()
         key_path = self.query_one("#ssh-key-path", Input).value.strip()
         if not host or not key_path:
@@ -989,7 +1036,6 @@ class TargetScreen(Vertical):
             status.set_class(name == "running", name)
         self._operation_active = True
         self._toggle_buttons(True)
-        self.query_one("#install-deps", Button).disabled = True
         self.app.show_loading(message)
 
     def _toggle_buttons(self, disabled: bool) -> None:
@@ -1002,8 +1048,8 @@ class TargetScreen(Vertical):
             "#run-converted",
         ):
             self.query_one(selector, Button).disabled = disabled
-        self.query_one("#run-converted", Button).disabled = disabled or not bool(
-            self._converted_source
+        self.query_one("#run-converted", Button).disabled = (
+            disabled or not self._converted_verified
         )
 
     def _set_status(
@@ -1016,7 +1062,6 @@ class TargetScreen(Vertical):
             status.set_class(name == selected_tone, name)
         self._operation_active = False
         self._toggle_buttons(False)
-        self._refresh_dependency_button()
         self._refresh_reconnect_button()
         self.app.hide_loading()
 
@@ -1038,16 +1083,15 @@ class TargetScreen(Vertical):
         self.query_one("#ai-api-key", Input).value = ""
         if error or summary is None:
             message = error or "The migration worker returned no summary."
-            self._converted_source = ""
-            self._converted_filename = ""
-            self.query_one("#run-converted", Button).disabled = True
+            self._set_converted_file("", "", verified=False)
             self._set_status(f"Migration failed · {message}", is_error=True)
             self.app.query_one("#results-view", ResultsScreen).show_migration_error(
                 f"Migration failed / {filename}", message, original_source
             )
         else:
-            self._converted_source = str(summary.get("converted_source") or "")
-            self._converted_filename = filename
+            self._set_converted_file(
+                str(summary.get("converted_source") or ""), filename, verified=True
+            )
             conversion = summary.get("conversion") or {}
             parity = summary.get("parity") or {}
             verdict = str(conversion.get("verdict") or "").lower()
@@ -1072,9 +1116,6 @@ class TargetScreen(Vertical):
                 original_source,
                 ai_options=self._ai_options,
             )
-            self.query_one("#run-converted", Button).disabled = not bool(
-                self._converted_source
-            )
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
 
     def _local_probe_done(self, facts: dict[str, Any], error: str) -> None:
@@ -1094,8 +1135,8 @@ class TargetScreen(Vertical):
             )
             self.app.query_one("#results-view", ResultsScreen).show_local_probe(facts)
             # A local machine is a target too: check it for the tools the
-            # pipeline needs the moment it is inspected, but only interrupt
-            # with the overlay when something actually wants attention.
+            # pipeline needs the moment it is inspected and report what's
+            # missing. No auto-install is offered.
             try:
                 from graft.target.local import local_target_facts
 
@@ -1121,6 +1162,11 @@ class TargetScreen(Vertical):
             # The Gemma key is likewise request-only for the locally generated
             # review.
             self.query_one("#ai-api-key", Input).value = ""
+            # Every new verification re-decides whether there is a converted
+            # file worth uploading. Clear it first so a run that fails, or one
+            # that only checked the bundled example, cannot leave the button
+            # armed with a result nobody verified.
+            self._set_converted_file("", "", verified=False)
         if error or result is None:
             self._gpu_status("set_disconnected", "TARGET CONNECTION FAILED")
             message = error or "The remote request returned no result."
@@ -1140,6 +1186,15 @@ class TargetScreen(Vertical):
             self._connected_facts = result.get("facts")
             self._pending_fields = None
             self._gpu_status("set_target_facts", result.get("facts"))
+            if mode == "verify":
+                # Only a verification that completed with a measured summary
+                # arms the upload button; anything else leaves it cleared.
+                summary = result.get("summary") or {}
+                self._set_converted_file(
+                    str(summary.get("converted_source") or ""),
+                    str(result.get("filename") or ""),
+                    verified=bool(result.get("ok")) and bool(summary),
+                )
             state = "ready" if result.get("ok") else "needs attention"
             label = {
                 "ai_file": "AI version run",
@@ -1151,12 +1206,7 @@ class TargetScreen(Vertical):
                 f"Remote {label} complete · target {state}",
                 tone="success" if result.get("ok") else "warning",
             )
-            # The moment a target connects, check it for the tools the
-            # pipeline needs and say what is missing, rather than waiting
-            # for the first operation to fail on one. Verification is an
-            # explicit "show me the result" action, so it never has an
-            # overlay thrown over its findings, and a fully-equipped target
-            # needs no overlay at all.
+            # Report what's missing rather than prompting an auto-install.
             if mode == "probe" and self._has_missing_dependencies(
                 self._connected_facts
             ):
@@ -1201,12 +1251,17 @@ class TargetScreen(Vertical):
                 )
             else:
                 note = ""
-                if mode == "probe" and (self._connected_fields or {}).get(
-                    "kind"
-                ) == "ssh":
+                kind = (self._connected_fields or {}).get("kind")
+                if mode == "probe" and kind == "ssh":
                     note = SSH_TORCH_DISCLAIMER
+                elif mode == "probe" and kind == "jupyter":
+                    note = (
+                        "Jupyter transport: token detection requires the correct "
+                        "Server URL pointing to that Jupyter server; if it cannot "
+                        "be found on the droplet, paste the token from the console "
+                        "or browser."
+                    )
                 results.show_remote(result, mode, note=note)
-            self._refresh_dependency_button()
             if self._connected_fields:
                 self._start_metrics("remote", self._connected_fields)
         self.app.query_one("#main-tabs", TabbedContent).active = "results"
@@ -1337,26 +1392,6 @@ class TargetScreen(Vertical):
         )
         self._reconnect_timer = self.set_timer(delay, self._start_reconnect)
 
-    def _refresh_dependency_button(self) -> None:
-        """Show the install button only when a checked target is missing tools.
-
-        Gating on the facts means the button cannot appear before a target has
-        been inspected, and it stays hidden when there is nothing to install.
-        """
-        if not self.is_mounted:
-            return
-        button = self.query_one("#install-deps", Button)
-        actionable: list[Any] = []
-        if self._connected_facts:
-            try:
-                actionable = actionable_dependencies(
-                    TargetFacts(**self._connected_facts)
-                )
-            except TypeError:
-                actionable = []
-        button.disabled = not actionable
-        button.display = bool(actionable)
-
     def _has_missing_dependencies(self, facts: dict[str, Any] | None) -> bool:
         """True when the connected target lacks at least one checked tool."""
         if not facts:
@@ -1392,8 +1427,8 @@ class TargetScreen(Vertical):
         names = ", ".join(getattr(dep, "label", dep.key) for dep in missing)
         message = (
             f"{action} needs {names} on the target, but it is not installed. "
-            "Install it with “Install missing dependencies”, or install it on "
-            "the target directly, then try again."
+            "Install it on the target (e.g. via its console or an SSH "
+            "session), then try again."
         )
         self._set_status(f"Blocked · {names} missing on the target", is_error=True)
         self.app.query_one("#results-view", ResultsScreen).show_missing_dependencies(
@@ -1408,36 +1443,13 @@ class TargetScreen(Vertical):
         fields: dict[str, Any] | None,
         label: str,
     ) -> None:
-        """Open the dependency checklist for a target that just connected.
-
-        The overlay is advisory: it names what is missing and offers to
-        install it, but nothing runs until its button is pressed.
-        """
+        """Open the report-only dependency checklist for a target that connected."""
         self.app.push_screen(
             DependencyOverlay(
                 facts,
                 fields=fields,
                 label=label,
-                on_refreshed=self._dependency_facts_refreshed,
             )
-        )
-
-    def _dependency_facts_refreshed(self, facts: dict[str, Any]) -> None:
-        """Adopt facts re-detected after an install from the overlay."""
-        if not self.is_mounted:
-            return
-        self._connected_facts = facts
-        self._gpu_status("set_target_facts", facts)
-        self._refresh_dependency_button()
-
-    def _start_dependency_install(self) -> None:
-        if not self._connected_fields or not self._connected_facts:
-            self._show_error("Connect to a target before installing dependencies.")
-            return
-        self._show_dependency_overlay(
-            self._connected_facts,
-            fields=self._connected_fields,
-            label=str(self._connected_fields.get("host") or "target"),
         )
 
     def _metrics_widget(self) -> GPUMetrics | None:

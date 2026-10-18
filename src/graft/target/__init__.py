@@ -11,7 +11,6 @@ from __future__ import annotations
 from graft.target.dependencies import (
     Dependency,
     actionable_dependencies,
-    install_dependencies,
     missing_dependencies,
     scan_dependencies,
 )
@@ -43,7 +42,6 @@ __all__ = [
     "actionable_dependencies",
     "clip",
     "discover_jupyter_token",
-    "install_dependencies",
     "local_capability",
     "local_target_facts",
     "missing_dependencies",

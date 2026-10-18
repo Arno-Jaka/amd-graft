@@ -16,6 +16,7 @@ import threading
 import types
 
 import pytest
+import requests
 
 import graft.target.detect as detect_module
 from graft.target import remote as remote_module
@@ -1109,6 +1110,104 @@ class TestJupyterCommandDeadline:
         assert DEFAULT_RUN_TIMEOUT_S > 0
 
 
+class _FakeResponse:
+    """A minimal response that satisfies `_check` for the retry tests."""
+
+    status_code = 200
+    ok = True
+
+    def json(self):
+        return {"name": 1}
+
+
+class TestJupyterConnectRetry:
+    """A fresh server or a dropped packet must not fail the whole operation."""
+
+    def _transport(self, monkeypatch):
+        from graft.target import jupyter
+
+        spec = parse_form(
+            {"kind": "jupyter", "host": "gpu.example.com", "token": "t"}
+        )
+        transport = jupyter.JupyterTransport(spec)
+        # Keep the backoff instant so the retry tests stay fast.
+        monkeypatch.setattr(jupyter, "CONNECT_BACKOFF_S", 0)
+        return transport
+
+    def test_a_transient_connection_error_is_retried_then_succeeds(self, monkeypatch):
+
+        transport = self._transport(monkeypatch)
+        calls: list[str] = []
+
+        def flaky(method, url, **kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                raise requests.exceptions.ConnectionError("connection refused")
+            return _FakeResponse()
+
+        monkeypatch.setattr(transport.session, "request", flaky)
+        response = transport._request("GET", "/api/status", what="status", timeout=5)
+        assert response.ok
+        # The first attempt failed; the retry delivered the response.
+        assert len(calls) == 2
+
+    def test_a_persistent_connection_error_gives_up_after_the_retries(self, monkeypatch):
+        from graft.target import jupyter
+
+        transport = self._transport(monkeypatch)
+        calls: list[str] = []
+
+        def always_fail(method, url, **kwargs):
+            calls.append(url)
+            raise requests.exceptions.ConnectionError("connection refused")
+
+        monkeypatch.setattr(transport.session, "request", always_fail)
+        with pytest.raises(TransportError) as caught:
+            transport._request("GET", "/api/status", what="status", timeout=5)
+        assert "Could not reach" in str(caught.value)
+        # Exactly the configured number of attempts, no more.
+        assert len(calls) == jupyter.CONNECT_RETRIES
+
+    def test_a_read_timeout_is_not_retried(self, monkeypatch):
+
+        transport = self._transport(monkeypatch)
+        calls: list[str] = []
+
+        def stalled(method, url, **kwargs):
+            calls.append(url)
+            raise requests.exceptions.ReadTimeout("read timed out")
+
+        monkeypatch.setattr(transport.session, "request", stalled)
+        with pytest.raises(TransportError) as caught:
+            transport._request("GET", "/api/status", what="status", timeout=5)
+        # A stalled request has its own budget; repeating it only makes it slower.
+        assert "Timed out" in str(caught.value)
+        assert len(calls) == 1
+
+    def test_a_dropped_handshake_is_retried_then_succeeds(self, monkeypatch):
+        import websocket
+
+        from graft.target import jupyter
+
+        transport = self._transport(monkeypatch)
+        attempts: list[int] = []
+
+        class _Socket:
+            def send(self, *_):
+                return None
+
+        def flaky(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise websocket.WebSocketException("handshake failed")
+            return _Socket()
+
+        monkeypatch.setattr(jupyter.websocket, "create_connection", flaky)
+        socket_ = transport._open_socket("1", 30)
+        assert isinstance(socket_, _Socket)
+        assert len(attempts) == 2
+
+
 class _RecordingSocket:
     """A terminal socket that records sends and replays canned frames."""
 
@@ -1475,7 +1574,31 @@ class TestDependencyScan:
         # A bare image has python3 but no pip, so pip has to be installed first.
         assert "apt-get install -y python3-pip" in torch.command
         assert torch.command.index("python3-pip") < torch.command.index("pip3 install")
-        assert "pip3 install torch torchvision" in torch.command
+        assert "pip3 install" in torch.command
+        assert "torch torchvision" in torch.command
+        # Ubuntu 24.04 marks the system Python externally managed, so pip needs
+        # the PEP 668 override or it refuses to install anything at all.
+        assert "--break-system-packages" in torch.command
+
+    def test_pip_break_flag_is_added_only_where_pep_668_is_enforced(self):
+        from graft.target.dependencies import _torch_command
+
+        # Ubuntu 24.04: externally managed, flag required.
+        assert "--break-system-packages" in _torch_command(
+            _deps_facts(os_name="Ubuntu 24.04.5 LTS")
+        )[0]
+        # Ubuntu 22.04 ships pip 22, which rejects the flag.
+        assert "--break-system-packages" not in _torch_command(
+            _deps_facts(os_name="Ubuntu 22.04.5 LTS")
+        )[0]
+        # Debian 12 is the first Debian trunk that enforces PEP 668.
+        assert "--break-system-packages" in _torch_command(
+            _deps_facts(os_name="Debian GNU/Linux 12 (bookworm)")
+        )[0]
+        # Debian 11 does not.
+        assert "--break-system-packages" not in _torch_command(
+            _deps_facts(os_name="Debian GNU/Linux 11 (bullseye)")
+        )[0]
 
     def test_torch_install_prefers_pytorch_own_rocm_series(self):
         from graft.target.dependencies import scan_dependencies
@@ -1510,62 +1633,6 @@ class TestDependencyScan:
         assert "hipcc" in [dep.key for dep in missing_dependencies(facts)]
 
 
-class TestDependencyInstall:
-    def test_only_the_missing_installable_commands_run(self):
-        from graft.target.dependencies import install_dependencies
-
-        # hipcc is present; hipify-perl and torch are missing and installable.
-        facts = _deps_facts(tools={"hipcc": "/opt/rocm/bin/hipcc"})
-        transport = FakeTransport()
-        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
-        results = install_dependencies(transport, spec, facts)
-
-        assert len(transport.commands) == 2
-        assert "apt-get install -y rocm-hip-sdk" in transport.commands[0]
-        assert any("install torch" in c for c in transport.commands)
-        assert all(item["ok"] for item in results)
-
-    def test_a_manual_gap_is_reported_and_nothing_else_runs(self):
-        from graft.target.dependencies import install_dependencies
-
-        facts = _deps_facts(
-            os_name="Red Hat Enterprise Linux 9",
-            tools={"hipify-perl": "/x"},
-        )
-        transport = FakeTransport()
-        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
-        results = install_dependencies(transport, spec, facts)
-
-        # hipcc cannot be auto-installed here, but torch still can.
-        assert all("apt-get" not in c for c in transport.commands)
-        manual = [item for item in results if item["key"] == "hipcc"]
-        assert manual and manual[0]["ok"] is False
-        assert "not apt-based" in manual[0]["error"]
-
-    def test_a_failed_command_is_reported_not_raised(self):
-        from graft.target.dependencies import install_dependencies
-
-        facts = _deps_facts(tools={})  # hipify-perl and hipcc missing
-        transport = FakeTransport(
-            {"apt-get": CommandResult("apt", 100, "", "E: Unable to locate package")}
-        )
-        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
-        results = install_dependencies(transport, spec, facts)
-
-        failed = [item for item in results if not item["ok"]]
-        assert failed
-        assert "Unable to locate package" in failed[0]["error"]
-
-    def test_progress_is_reported_per_dependency(self):
-        from graft.target.dependencies import install_dependencies
-
-        seen: list[str] = []
-        facts = _deps_facts(tools={"hipcc": "/x"})
-        spec = parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"})
-        install_dependencies(
-            FakeTransport(), spec, facts, on_progress=lambda key, _: seen.append(key)
-        )
-        assert "torch" in seen
 
 
 # --- metrics ----------------------------------------------------------------
@@ -1670,38 +1737,6 @@ class TestLocalTarget:
         with pytest.raises(TransportError):
             transport.push(b"data", "/tmp/x")
 
-    def test_install_dependencies_accepts_a_local_run_with_results(self):
-        from graft.target.dependencies import install_dependencies
-        from graft.target.local import LocalTransport
-
-        facts = _deps_facts(tools={"hipcc": "/x"})  # torch missing, installable
-        commands: list[str] = []
-
-        def fake_run(command, *, cwd=None, timeout_s=None):
-            commands.append(command)
-            return CommandResult(command, 0, "installed", "")
-
-        with LocalTransport() as transport:
-            # spec=None is the local path; the command table is the same one
-            # a remote target gets, and here it is stubbed so no pip runs.
-            transport.run = fake_run
-            results = install_dependencies(transport, None, facts)
-        assert any("install torch" in command for command in commands)
-        assert all(item["ok"] for item in results)
-
-    def test_on_result_reports_each_outcome_in_order(self):
-        from graft.target.dependencies import install_dependencies
-
-        facts = _deps_facts(tools={})  # hipify-perl and hipcc missing, torch too
-        outcomes: list[str] = []
-        install_dependencies(
-            FakeTransport(),
-            parse_form({"kind": "ssh", "host": "10.0.0.9", "key_path": "/tmp/k"}),
-            facts,
-            on_result=lambda outcome: outcomes.append(outcome["key"]),
-        )
-        assert outcomes  # every reported gap reaches the callback
-        assert all(key in {"hipify-perl", "hipcc", "torch"} for key in outcomes)
 
 
 class TestLocalSysfsMetrics:

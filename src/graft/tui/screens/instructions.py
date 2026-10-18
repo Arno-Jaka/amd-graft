@@ -51,7 +51,7 @@ GUIDE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "Verify on GPU uploads this project and runs the HIP verification suite on the remote device.",
             "Upload & run converted file runs the file from step 1 on the GPU and reports its output.",
-            "If the dependency scan reports a gap, Install missing dependencies fills it.",
+            "If the dependency scan reports a gap, the overlay names what is missing so you can install it on the target.",
         ),
     ),
     (

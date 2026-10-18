@@ -12,12 +12,11 @@ paths, never from free-form input, and the paths are shell-quoted.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from graft.target.detect import TargetFacts
-from graft.target.spec import TargetSpec
 from graft.target.transport import quote
 
 # Only these OS families are assumed to have apt. Anything else gets a manual
@@ -66,6 +65,39 @@ def _rocm_series(version: str) -> str:
     return ""
 
 
+def _python_is_externally_managed(facts: TargetFacts) -> bool:
+    """Whether the target's pip enforces PEP 668.
+
+    Ubuntu 23.04+, Debian 12+, and their derivatives mark the system Python as
+    externally managed, so a bare ``pip install`` refuses with
+    "externally-managed-environment" and nothing gets installed. On those
+    releases pip accepts ``--break-system-packages``, which is what AMD's own
+    ROCm install notes use. Older releases ship a pip that does not understand
+    the flag, so passing it there would replace a working install with an
+    "unknown option" error; they are left alone.
+    """
+    name = facts.os_name.lower()
+    match = re.search(r"(\d+)(?:\.(\d+))?", name)
+    if not match:
+        return False
+    major = int(match.group(1))
+    minor = int(match.group(2) or 0)
+    if "linux mint" in name:
+        # Mint 22 is based on Ubuntu 24.04 and enforces PEP 668; 21 and older
+        # are based on 22.04 and do not.
+        return major >= 22
+    if "debian" in name:
+        return major >= 12
+    if "ubuntu" in name or "pop" in name:
+        return (major, minor) >= (23, 4)
+    return False
+
+
+def _pip_break_flag(facts: TargetFacts) -> str:
+    """The PEP 668 override as a leading space, or "" when it is not needed."""
+    return " --break-system-packages" if _python_is_externally_managed(facts) else ""
+
+
 def _torch_command(facts: TargetFacts) -> tuple[str, str]:
     """Return (command, detail) for installing PyTorch that can see the GPU.
 
@@ -80,19 +112,23 @@ def _torch_command(facts: TargetFacts) -> tuple[str, str]:
     build.
     """
     python = quote(facts.python_path or "python3")
+    break_flag = _pip_break_flag(facts)
     rocm_series = _rocm_series(facts.torch_hip) or _rocm_series(facts.rocm_version)
     if rocm_series:
         index = f"https://download.pytorch.org/whl/rocm{rocm_series}"
         wheels = f"torch torchvision --index-url {quote(index)}"
         if _is_debian_like(facts):
-            command = f"{_APT_INSTALL} python3-pip && pip3 install {wheels}"
+            command = (
+                f"{_APT_INSTALL} python3-pip && "
+                f"pip3 install{break_flag} {wheels}"
+            )
         else:
-            command = f"{python} -m pip install {wheels}"
+            command = f"{python} -m pip install{break_flag} {wheels}"
         return command, f"PyTorch from the ROCm {rocm_series} wheel index."
     # Keep behavior consistent with tests: when unknown, fall back to PyPI
     return (
-        f"{python} -m pip install --upgrade pip && "
-        f"{python} -m pip install torch torchvision",
+        f"{python} -m pip install{break_flag} --upgrade pip && "
+        f"{python} -m pip install{break_flag} torch torchvision",
         "ROCm version unknown; installing the default PyPI wheel. Install a "
         "matching ROCm wheel by hand if GPU support is needed.",
     )
@@ -207,75 +243,3 @@ def actionable_dependencies(facts: TargetFacts) -> list[Dependency]:
         for dep in scan_dependencies(facts)
         if not dep.present and (dep.command or dep.required)
     ]
-
-
-ProgressHook = Callable[[str, str], None]
-ResultHook = Callable[[dict[str, Any]], None]
-
-# Local installs have no TargetSpec to take a timeout from. Two minutes per
-# command matches the remote default's spirit without making a slow apt run
-# look like a hang.
-_LOCAL_TIMEOUT_S = 1800
-
-
-def install_dependencies(
-    transport,
-    spec: TargetSpec | None,
-    facts: TargetFacts,
-    *,
-    on_progress: ProgressHook | None = None,
-    on_result: ResultHook | None = None,
-) -> list[dict[str, Any]]:
-    """Install the missing, installable dependencies and return the outcomes.
-
-    ``spec`` may be ``None`` for a local target, where the transport runs the
-    same fixed commands on this machine. ``on_progress`` fires before each
-    install and ``on_result`` after each one, so a UI can show live progress
-    rather than one silent batch at the end.
-
-    Non-installable gaps are returned with ``ok`` false and their manual hint,
-    so the caller can show the whole story rather than a silent no-op.
-    """
-    timeout_s = spec.command_timeout_s if spec is not None else _LOCAL_TIMEOUT_S
-    results: list[dict[str, Any]] = []
-    for dep in scan_dependencies(facts):
-        if dep.present:
-            continue
-        if not dep.command:
-            # Nothing we can run. Only report the gaps that matter.
-            if dep.required:
-                outcome = {
-                    "key": dep.key,
-                    "label": dep.label,
-                    "ok": False,
-                    "error": dep.detail or "Install by hand.",
-                }
-                results.append(outcome)
-                if on_result is not None:
-                    on_result(outcome)
-            continue
-        if on_progress is not None:
-            on_progress(dep.key, f"Installing {dep.label}…")
-        result = transport.run(dep.command, timeout_s=timeout_s)
-        outcome = {
-            "key": dep.key,
-            "label": dep.label,
-            "ok": result.ok,
-            "output": result.summary(800) if result.ok else "",
-            "error": "" if result.ok else result.summary(800),
-        }
-        results.append(outcome)
-        if on_result is not None:
-            on_result(outcome)
-    return results
-
-
-__all__ = [
-    "Dependency",
-    "ProgressHook",
-    "ResultHook",
-    "actionable_dependencies",
-    "install_dependencies",
-    "missing_dependencies",
-    "scan_dependencies",
-]
