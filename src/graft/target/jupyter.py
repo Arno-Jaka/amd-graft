@@ -39,6 +39,20 @@ CONTENT_TYPE = "application/json"
 BEGIN = "__GRAFT_BEGIN__"
 END = "__GRAFT_END__"
 
+
+def _hidden_literal(marker: str) -> str:
+    """Quote a marker so its text never appears literally in the typed script.
+
+    A terminal that echoes what it is sent hands the reader the raw script
+    back before the command runs. If that echo contained a marker, the reader
+    would stop on it and read the echoed command line as the result, which has
+    no status digits after it and so looks like a failed command. Splitting the
+    word across two quoted pieces keeps the contiguous marker out of the echo
+    while the shell still prints it from the variable.
+    """
+    middle = len(marker) // 2
+    return f'"{marker[:middle]}""{marker[middle:]}"'
+
 EXIT_NO_SUCH_DIR = 97
 
 DEFAULT_RUN_TIMEOUT_S = 900
@@ -270,12 +284,14 @@ class JupyterTransport:
         """The shell script that runs one command and reports its status."""
         parts = [
             "PS1= PS2= PROMPT_COMMAND=; stty -echo 2>/dev/null",
-            f"printf '%s\\n' {BEGIN}",
+            f"__graft_begin={_hidden_literal(BEGIN)}",
+            "printf '%s\\n' \"$__graft_begin\"",
         ]
         if cwd:
             parts.append(f"cd {quote(cwd)} || exit {EXIT_NO_SUCH_DIR}")
         parts.append(f"{{ {command}\n}}; __graft_rc=$?")
-        parts.append(f"printf '%s%s\\n' \"$__graft_rc\" {END}")
+        parts.append(f"__graft_end={_hidden_literal(END)}")
+        parts.append("printf '%s%s\\n' \"$__graft_rc\" \"$__graft_end\"")
         parts.append("exit $__graft_rc")
         return "\n".join(parts)
 

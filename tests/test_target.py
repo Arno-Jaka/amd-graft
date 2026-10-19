@@ -1388,6 +1388,41 @@ class TestJupyterTerminalFraming:
 
         assert json.loads(socket_.sent[0]) == ["stdin", "echo hi"]
 
+    def test_the_script_keeps_its_markers_out_of_the_input_echo(self):
+        """An echoing terminal must not hand the reader the raw markers."""
+        from graft.target.jupyter import BEGIN, END, JupyterTransport
+
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+
+        script = transport._script("echo hi", None)
+
+        assert BEGIN not in script
+        assert END not in script
+
+    def test_an_echoing_terminal_still_returns_the_real_result(self, monkeypatch):
+        """Input echo carries no marker, so the loop waits for real output.
+
+        A PTY echoes the script back before running it. When the markers were
+        sent literally, the echoed command line supplied an early ``END`` and
+        the reader stopped before the command ran, reporting a nonzero status
+        for a command that never failed.
+        """
+        from graft.target.jupyter import BEGIN, END, JupyterTransport, _split_markers
+
+        spec = parse_form({"kind": "jupyter", "host": "gpu.example.com"})
+        transport = JupyterTransport(spec)
+        script = transport._script("echo hi", None)
+        echoed = _stdout(script.replace("\n", "\r\n"))
+        real = _stdout(f"{BEGIN}\r\nhi\r\n0{END}\r\n")
+        socket_ = _RecordingSocket([echoed, real])
+        monkeypatch.setattr(transport, "_open_socket", lambda *_: socket_)
+
+        body, code = _split_markers(transport._drive("1", script, 5))
+
+        assert code == 0
+        assert body.strip("\r\n") == "hi"
+
     def test_stream_sends_a_framed_command(self, monkeypatch):
         from graft.target.jupyter import JupyterTransport
 
